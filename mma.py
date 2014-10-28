@@ -1,22 +1,48 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#! /usr/bin/env python
+# -*- coding: ascii -*-
 
-# Samplicity v0.4
-# September 27th, 2012
-# © Magalich Andrew
-# https://github.com/ckald/Samplicity
+# Copyright (c) 2014 Franco Bugnano
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+# Based on Samplicity v0.4
+# Samplicity Copyright (C) 2012 Magalich Andrew
+
+import sys
+import os
 
 import struct
 import string
-import os
 import tempfile
 import wave
 import sys
 import sndhdr
-from array import array
 import time
 import math
 import shutil
+
+from array import array
+
+
+__version__ = '0.0.1'
+
+VERSION = ''.join(['MMA v', __version__])
 
 
 if len(sys.argv) < 2:
@@ -59,7 +85,7 @@ def read_wav(sample_path):
 
 	if channels == 1:
 		text_type = 'mono'
-		sample_type = 0
+		sample_type = 0b00010000
 	elif channels == 2:
 		text_type = 'stereo'
 		sample_type = 0b01010000
@@ -277,7 +303,7 @@ def magic(filename):
 	# create xi file
 	file.write(struct.pack('21s22sb20sh',\
 		'Extended Instrument: ', (filename[:-4] + ' ' * 22)[:22], 0x1a,\
-		pad_name('Samplicity v0.3', 20), 0x0))
+		pad_name(VERSION, 20), 0x0102))
 
 	notes_samples = [0 for i in range(96)]
 
@@ -494,3 +520,4 @@ finally:
 	except OSError, e:
 		if e.errno != 2:  # code 2 - no such file or directory
 			raise
+
