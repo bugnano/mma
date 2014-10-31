@@ -3,7 +3,7 @@
 MMA
 ===
 
-MMA is a command line sample convertion tool created
+MMA is a command line sample conversion tool created
 to transform .SFZ sample packs to .XI (Fasttracker 2 eXtended Instrument)
 format, supported by a number of music creation software.
 
@@ -24,15 +24,27 @@ pack.
     Your tracker may crash for wrongly encoded .XI-instruments, so
     **you should save your files every time before loading an instrument**
 
+Known Issues
+------------
+
+This version of MMA has the following known issues:
+
+- Stereo samples are non-standard and only waste space when used in MilkyTracker_, as it automatically converts them to mono, so support for stereo samples will be removed in a future version
+- The XI format supports only 8 and 16 bit samples, but at the moment 8 bit samples are broken. 24 and 32 bit sample support will be removed, as it doesn't work in MilkyTracker_
+- The maximum number of samples-per-instrument supported by MilkyTracker_ is 16, not 128, so it will be reduced to 16 in a future version
+- Sample looping is not supported yet
+- Samples relative note may be wrong
+
+Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 16 bit mono wav format.
+
 Formats
 =======
 
 eXtended Instrument
 -------------------
 
-This format was created in 1990's for DOS
-music tracker called Fasttracker 2. It's binary, old and rusty, but still
-useful.
+This format was created in 1990's for DOS music tracker called Fasttracker 2.
+It's binary, old and rusty, but still useful.
 
 SFZ
 ---
@@ -148,6 +160,7 @@ Notices and errors
 .. _Samplicity: https://github.com/ckald/Samplicity/
 .. _Alex Zolotov: http://www.warmplace.ru/
 .. _Python: https://www.python.org/
+.. _SOX: http://sox.sourceforge.net/
 
 .. |SSO| replace:: Sonatina Symphonic Orchestra
 .. _SSO: http://sso.mattiaswestlund.net/
