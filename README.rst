@@ -33,7 +33,6 @@ This version of MMA has the following known issues:
 - The XI format supports only 8 and 16 bit samples, but at the moment 8 bit samples are broken. 24 and 32 bit sample support will be removed, as it doesn't work in MilkyTracker_
 - The maximum number of samples-per-instrument supported by MilkyTracker_ is 16, not 128, so it will be reduced to 16 in a future version
 - Sample looping is not supported yet
-- Samples relative note may be wrong (It depends on the sampling rate of the samples, resampling to 8363Hz may be useful)
 
 Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 16 bit mono wav format.
 

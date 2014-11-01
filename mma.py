@@ -46,11 +46,14 @@ VERSION = ''.join(['MMA v', __version__])
 
 NOTES = []
 scale = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b']
-for i in range(1, 11):
+for i in range(11):
 	NOTES.extend([(note + str(i)) for note in scale])
 del scale
 del i
 del note
+
+# The relative note with value 0 (C-4), in MIDI notation
+REL_NOTE_ZERO = 'c4'
 
 
 def pad_name(name, length, pad=' ', dir='right'):
@@ -67,6 +70,99 @@ def wrap(text, width):
 	breaks are posix newlines (\n).
 	'''
 	return reduce(lambda line, word, width=width: '%s%s%s' % (line, ' \n'[(len(line) - line.rfind('\n') - 1 + len(word.split('\n', 1)[0]) >= width)], word), text.split(' '))
+
+
+# FixedMUL, getc4spd and convertc4spd are magic functions taken from the MilkyTracker source code
+mp_sbyte = lambda x: struct.unpack('<b', chr(int(x) & 0xFF))[0]
+
+def FixedMUL(a, b):
+	return ((a * b) >> 16)
+
+def getc4spd(relnote, finetune):
+	table = [
+		65536,69432,73561,77935,82570,87480,92681,98193,104031,110217,116771,123715,
+		65536,65565,65595,65624,65654,65684,65713,65743,65773,65802,65832,65862,65891,
+		65921,65951,65981,66010,66040,66070,66100,66130,66160,66189,66219,66249,66279,
+		66309,66339,66369,66399,66429,66459,66489,66519,66549,66579,66609,66639,66669,
+		66699,66729,66759,66789,66820,66850,66880,66910,66940,66971,67001,67031,67061,
+		67092,67122,67152,67182,67213,67243,67273,67304,67334,67365,67395,67425,67456,
+		67486,67517,67547,67578,67608,67639,67669,67700,67730,67761,67792,67822,67853,
+		67883,67914,67945,67975,68006,68037,68067,68098,68129,68160,68190,68221,68252,
+		68283,68314,68344,68375,68406,68437,68468,68499,68530,68561,68592,68623,68654,
+		68685,68716,68747,68778,68809,68840,68871,68902,68933,68964,68995,69026,69057,
+		69089,69120,69151,69182,69213,69245,69276,69307,69339,69370,69401
+	]
+
+	c4spd = 8363
+	xmfine = mp_sbyte(finetune)
+
+	octave = mp_sbyte((relnote + 96) / 12)
+	note = mp_sbyte((relnote + 96) % 12)
+
+	o2 = mp_sbyte(octave - 8)
+
+	if xmfine < 0:
+		xmfine = mp_sbyte(xmfine + 128)
+		note -= 1
+		if note < 0:
+			note += 12
+			o2 -= 1
+
+	if o2 >= 0:
+		c4spd <<= o2
+	else:
+		c4spd >>= -o2
+
+	f = FixedMUL(table[note], c4spd)
+	return FixedMUL(f, table[xmfine+12])
+
+def convertc4spd(c4spd):
+	xmfine = 0
+	cl = 0
+	ch = 0
+	ebp = 0xFFFFFFFF
+	ebx = c4spd
+
+	aloop = True
+	while aloop:
+		aloop = False
+		c4s2 = ebx & 0xFFFFFFFF
+		c4s = getc4spd(cl-48, 0) & 0xFFFFFFFF
+		if c4s < c4s2:
+			s = c4s2
+			c4s2 = c4s
+			c4s = s
+		dc4 = (c4s - c4s2) & 0xFFFFFFFF
+		if dc4 < ebp:
+			ebp = dc4 & 0xFFFFFFFF
+			ch = cl
+			cl = mp_sbyte(cl + 1)
+			if cl < 119:
+				aloop = True
+		if not aloop:
+			cl = 0
+
+	aloop2 = True
+	while aloop2:
+		aloop2 = False
+		c4s2 = ebx & 0xFFFFFFFF
+		c4s = getc4spd(ch-48, xmfine) & 0xFFFFFFFF
+		if c4s < c4s2:
+			s = c4s2
+			c4s2 = c4s
+			c4s = s
+		dc4 = (c4s - c4s2) & 0xFFFFFFFF
+		if dc4 < ebp:
+			ebp = dc4 & 0xFFFFFFFF
+			cl = mp_sbyte(xmfine)
+		xmfine += 1
+		if xmfine < 256:
+			aloop2 = True
+
+	ch = mp_sbyte(ch - 48)
+	finetune = cl
+	relnote = ch
+	return (finetune, relnote)
 
 
 class SFZ_region(dict):
@@ -146,7 +242,7 @@ class SFZ_region(dict):
 
 		frames = []
 		del frames
-		return (ret, sample_type, byte)
+		return (ret, sample_type, byte, sampling_rate)
 
 	def validate(self):
 		if 'tune' not in self:
@@ -168,7 +264,7 @@ class SFZ_region(dict):
 	def load_audio(self, cwd):
 		self['sample_path'] = self['sample'].replace('\\', '/')
 		if self['sample_path'][-4:] == '.wav':
-			(self['sample_data'], self['sample_type'], self['sample_bittype']) = self.read_wav(self['sample_path'], cwd)
+			(self['sample_data'], self['sample_type'], self['sample_bittype'], self['sample_rate']) = self.read_wav(self['sample_path'], cwd)
 
 
 class SFZ_instrument:
@@ -433,7 +529,12 @@ def magic(filename, cwd, tempdir):
 		else:
 			fp.write(struct.pack('<B', 255))
 
-		fp.write(struct.pack('<b', int(region['tune'])))  # finetune (signed!)
+		# Get the relative note and finetune based on the sampling rate of the sample
+		finetune, relnote = convertc4spd(region['sample_rate'])
+		relnote += NOTES.index(REL_NOTE_ZERO)
+
+		fp.write(struct.pack('<b', finetune + int(region['tune'])))  # finetune (signed!)
+
 		fp.write(struct.pack('<b', region['sample_type']))  # sample type
 
 		#panning (unsigned!)
@@ -442,14 +543,11 @@ def magic(filename, cwd, tempdir):
 		else:
 			fp.write(struct.pack('<B', 128))
 
+		# relative note - transpose c4 ~ 00
 		if 'pitch_keycenter' in region:
-			fp.write(struct.pack('<b',
-			 NOTES.index(region['pitch_keycenter'])
-			 - NOTES.index('c5')))	# relative note - transpose c4 ~ 00
+			fp.write(struct.pack('<b', relnote - NOTES.index(region['pitch_keycenter'])))
 		else:
-			fp.write(struct.pack('<b',
-			 NOTES.index(region['lokey'])
-			 - NOTES.index('c5')))	# relative note - transpose c4 ~ 00
+			fp.write(struct.pack('<b', relnote - NOTES.index(region['lokey'])))
 
 		sample_name = pad_name(os.path.split(region['sample_path'])[1], 22)
 
