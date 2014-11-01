@@ -46,7 +46,7 @@ VERSION = ''.join(['MMA v', __version__])
 
 NOTES = []
 scale = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b']
-for i in range(11):
+for i in range(1, 11):
 	NOTES.extend([(note + str(i)) for note in scale])
 del scale
 del i
@@ -242,9 +242,6 @@ class SFZ_instrument:
 			self.in_region = False
 			self.group = {}
 		elif chunk == '<region>':  # it's a region - save the following and add group data
-			if len(self.regions) >= 128:
-				print('Too many samples in file:', self.filename, ' (no more than 128 samples supported)')
-				sys.exit(1)
 			self.regions.append(SFZ_region())
 			self.curr += 1
 			if self.in_group:
@@ -283,8 +280,12 @@ def magic(filename, cwd, tempdir):
 	overlapping = []
 	ignored = []
 
-	i = 0
 
+	if len(instrument.regions) >= 16:
+		print('Too many samples in file:', filename, ' (no more than 16 samples supported)')
+		instrument.regions = instrument.regions[:16]
+
+	i = 0
 	for region in instrument.regions:
 		for note in region['notes']:
 			if note < len(notes_samples) and note > -1:
@@ -443,12 +444,12 @@ def magic(filename, cwd, tempdir):
 
 		if 'pitch_keycenter' in region:
 			fp.write(struct.pack('<b',
-			 1 - NOTES.index(region['pitch_keycenter'])
-			 + NOTES.index('e6')))	# relative note - transpose c4 ~ 00
+			 NOTES.index(region['pitch_keycenter'])
+			 - NOTES.index('c5')))	# relative note - transpose c4 ~ 00
 		else:
 			fp.write(struct.pack('<b',
-			 1 - NOTES.index(region['lokey'])
-			 + NOTES.index('e6')))	# relative note - transpose c4 ~ 00
+			 NOTES.index(region['lokey'])
+			 - NOTES.index('c5')))	# relative note - transpose c4 ~ 00
 
 		sample_name = pad_name(os.path.split(region['sample_path'])[1], 22)
 
