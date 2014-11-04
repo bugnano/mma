@@ -30,14 +30,10 @@ import sys
 import os
 
 import struct
-import tempfile
 import wave
 import sndhdr
 import timeit
 import math
-import shutil
-
-from array import array
 
 
 __version__ = '0.0.1'
@@ -55,6 +51,17 @@ del note
 # The relative note with value 0 (C-4), in MIDI notation
 REL_NOTE_ZERO = 'c4'
 
+SAMPLE_TYPE_8BIT = 0x00
+SAMPLE_TYPE_16BIT = 0x10
+SAMPLE_TYPE_MONO = 0x00
+SAMPLE_TYPE_STEREO = 0x40	# Non-standard
+SAMPLE_TYPE_NO_LOOP = 0x00
+SAMPLE_TYPE_FWD_LOOP = 0x01
+SAMPLE_TYPE_BIDI_LOOP = 0x02
+
+XI_VERSION_FT2 = 0x0102
+XI_VERSION_PSYTEXX = 0x5050	# Non-standard
+
 
 def pad_name(name, length, pad=' ', dir='right'):
 	if dir == 'right':
@@ -70,6 +77,102 @@ def wrap(text, width):
 	breaks are posix newlines (\n).
 	'''
 	return reduce(lambda line, word, width=width: '%s%s%s' % (line, ' \n'[(len(line) - line.rfind('\n') - 1 + len(word.split('\n', 1)[0]) >= width)], word), text.split(' '))
+
+
+def identify_sample(sample_path):
+	what = sndhdr.what(sample_path)
+	if not what:
+		print('This is not wav file:', sample_path)
+		sys.exit(1)
+
+	(format_, sampling_rate, channels, frames_count, bits_per_sample) = what
+
+	if format_ != 'wav':
+		print('This is not wav file:', sample_path)
+		sys.exit(1)
+
+	sample = wave.open(sample_path, 'rb')
+
+	# The values returned by the wave module are more reliable than those returned by the sndhdr module
+	sampling_rate = sample.getframerate()
+	channels = sample.getnchannels()
+	frames_count = sample.getnframes()
+	byte = sample.getsampwidth()
+	bits_per_sample = byte * 8
+
+	sample_type = 0
+
+	if sampling_rate == 0:
+		print('Unknown sampling rate for wav file:', sample_path)
+		sys.exit(1)
+
+	if frames_count == -1:
+		print('Unknown frame count for wav file:', sample_path)
+		sys.exit(1)
+
+	if bits_per_sample == 8:
+		sample_type |= SAMPLE_TYPE_8BIT
+	elif bits_per_sample == 16:
+		sample_type |= SAMPLE_TYPE_16BIT
+	else:
+		print('/' * 80)
+		print('{0}-bit samples are not supported'.format(bits_per_sample))
+		print('/' * 80)
+		sys.exit(1)
+
+	xi_version = XI_VERSION_FT2
+	if channels == 1:
+		text_type = 'mono'
+		sample_type |= SAMPLE_TYPE_MONO
+	elif channels == 2:
+		text_type = 'stereo'
+		sample_type |= SAMPLE_TYPE_STEREO
+		xi_version = XI_VERSION_PSYTEXX
+		print('stereo samples are not supported')
+	else:
+		text_type = '{0}-channels'.format(channels)
+		print('/' * 80)
+		print('{0}-channels samples are not supported'.format(channels))
+		print('/' * 80)
+		sys.exit(1)
+
+	print('*', bits_per_sample, 'bit', text_type, 'sample "', sample_path, '"', int((byte * frames_count * channels) / 1024), 'kB')
+
+	return (sampling_rate, byte, channels, frames_count, xi_version, sample_type)
+
+
+def write_delta_sample(sample_path, fp):
+	sample = wave.open(sample_path, 'rb')
+
+	byte = sample.getsampwidth()
+	if byte == 1:
+		bittype = 'B'
+		scissors = 0xFF
+	elif byte == 2:
+		bittype = 'H'
+		scissors = 0xFFFF
+	else:
+		print('/' * 80)
+		print('{0}-bit samples are not supported'.format(byte * 8))
+		print('/' * 80)
+		sys.exit(1)
+
+	frames = []
+	while True:
+		r = sample.readframes(512)
+		if not r:
+			break
+
+		frames.extend(struct.unpack(''.join(['<{0}'.format(int(len(r) / byte)), bittype]), r))
+
+	sample.close()
+
+	delta = 0
+	for frame in frames:
+		original = frame
+		frame = (frame - delta) & scissors
+		delta = original
+		fp.write(struct.pack(''.join(['<', bittype]), frame))
 
 
 # FixedMUL, getc4spd and convertc4spd are magic functions taken from the MilkyTracker source code
@@ -165,85 +268,81 @@ def convertc4spd(c4spd):
 	return (finetune, relnote)
 
 
+# path_insensitive and _path_insensitive functions by Chris Morgan (originally on the PortableApps development toolkit)
+def path_insensitive(path):
+	"""
+	Get a case-insensitive path for use on a case sensitive system.
+
+	>>> path_insensitive('/Home')
+	'/home'
+	>>> path_insensitive('/Home/chris')
+	'/home/chris'
+	>>> path_insensitive('/HoME/CHris/')
+	'/home/chris/'
+	>>> path_insensitive('/home/CHRIS')
+	'/home/chris'
+	>>> path_insensitive('/Home/CHRIS/.gtk-bookmarks')
+	'/home/chris/.gtk-bookmarks'
+	>>> path_insensitive('/home/chris/.GTK-bookmarks')
+	'/home/chris/.gtk-bookmarks'
+	>>> path_insensitive('/HOME/Chris/.GTK-bookmarks')
+	'/home/chris/.gtk-bookmarks'
+	>>> path_insensitive("/HOME/Chris/I HOPE this doesn't exist")
+	"/HOME/Chris/I HOPE this doesn't exist"
+	"""
+
+	return _path_insensitive(path) or path
+
+def _path_insensitive(path):
+	"""
+	Recursive part of path_insensitive to do the work.
+	"""
+
+	if path == '' or os.path.exists(path):
+		return path
+
+	base = os.path.basename(path)  # may be a directory or a file
+	dirname = os.path.dirname(path)
+
+	suffix = ''
+	if not base:  # dir ends with a slash?
+		if len(dirname) < len(path):
+			suffix = path[:len(path) - len(dirname)]
+
+		base = os.path.basename(dirname)
+		dirname = os.path.dirname(dirname)
+
+	if not os.path.exists(dirname):
+		dirname = _path_insensitive(dirname)
+		if not dirname:
+			return
+
+	# at this point, the directory exists but not the file
+
+	try:  # we are expecting dirname to be a directory, but it could be a file
+		files = os.listdir(dirname)
+	except OSError:
+		return
+
+	baselow = base.lower()
+	try:
+		basefinal = next(fl for fl in files if fl.lower() == baselow)
+	except StopIteration:
+		return
+
+	if basefinal:
+		return os.path.join(dirname, basefinal) + suffix
+	else:
+		return
+
+def path_local(path):
+	if os.sep == '\\':
+		return path
+	else:
+		return path.replace('\\', os.sep)
+
+
 class SFZ_region(dict):
-	def read_wav(self, sample_path, cwd):
-		(format_, sampling_rate, channels, frames_count, bits_per_sample) = sndhdr.what(cwd + sample_path)
-		sample = wave.open(cwd + sample_path)
-
-		if frames_count == -1:
-			frames_count = sample.getnframes()
-
-		if format_ != 'wav':
-			print('This is not wav file:', sample_path)
-
-		if channels == 1:
-			text_type = 'mono'
-			sample_type = 0b00010000
-		elif channels == 2:
-			text_type = 'stereo'
-			sample_type = 0b01010000
-		else:
-			text_type = '{0}-channels'.format(channels)
-
-		byte = int(bits_per_sample / 8)	# sample.getsampwidth()
-
-		if byte == 3:  # for some reason
-			print('*', (byte * 8), 'bit', text_type, 'sample "', sample_path, '"', int(byte * frames_count / (2 ** 9)), 'kB')
-		else:
-			print('*', (byte * 8), 'bit', text_type, 'sample "', sample_path, '"', int(byte * frames_count / (2 ** 10)), 'kB')
-
-		if byte == 1:
-			bittype = 'B'
-			scissors = 0xFF
-		elif byte == 2:
-			bittype = 'H'
-			scissors = 0xFFFF
-		elif byte == 3:
-			scissors = 0xFFFFFF
-			bittype = 'I'
-			print('/' * 80)
-			print('24bit samples are not supported')
-			print('/' * 80)
-			# return ([], sample_type)
-		elif byte == 4:
-			scissors = 0xFFFFFFFF
-			bittype = 'I'
-
-		delta = 0
-		frames = []
-		total_len = byte * frames_count
-
-		if byte == 3:  # need to treat this independently for some reason. maybe, python.wave bug?
-			frames = struct.unpack('<{0}B'.format(total_len * 2), sample.readframes(total_len))
-			# frames = []
-			# for i in range(int(total_len / 2)):
-			#	  bytes = struct.unpack('<6B', sample.readframes(1))
-			#	  for j in range(int(len(bytes) / 3)):
-			#		  frames.append(bytes[j] + bytes[j + 1] << 0xFF + bytes[j + 2] << 0xFFFF)
-					# 'cause little-endian
-			# bytes = struct.unpack('<{0}'.format(int(total_len / 2)) + bittype, sample.readframes(total_len))
-			# for i in range(int(total_len / 3)):
-			#	  frames.append(bytes[i] + bytes[i + 1] << 0xFF + bytes[i + 2] << 0xFFFF)
-				# 'cause little-endian
-		else:
-			for i in range(int(total_len / (2 ** 9) + 1)):
-				r = sample.readframes(2 ** 9)
-				frames[len(frames):] = struct.unpack('<{0}'.format(int(len(r) / byte)) + bittype, r)
-
-		sample.close()
-		del sample
-
-		ret = array(bittype)
-		for frame in frames:
-			original = frame
-			frame = (frame - delta) & scissors
-			delta = original
-			ret.append(frame)
-
-		frames = []
-		del frames
-		return (ret, sample_type, byte, sampling_rate)
-
 	def validate(self):
 		if 'tune' not in self:
 			self['tune'] = 0
@@ -262,13 +361,12 @@ class SFZ_region(dict):
 				self[key] = NOTES[int(self[key])]
 
 	def load_audio(self, cwd):
-		self['sample_path'] = self['sample'].replace('\\', '/')
-		if self['sample_path'][-4:] == '.wav':
-			(self['sample_data'], self['sample_type'], self['sample_bittype'], self['sample_rate']) = self.read_wav(self['sample_path'], cwd)
+		self['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, path_local(self['sample']))))
+		(self['sample_rate'], self['sample_bittype'], self['sample_channels'], self['sample_length'], self['sample_xi_version'], self['sample_type']) = identify_sample(self['sample_path'])
 
 
 class SFZ_instrument:
-	def __init__(self, filename, cwd, tempdir):
+	def __init__(self, filename, cwd):
 		self.open(filename)
 
 		self.regions = []
@@ -290,23 +388,6 @@ class SFZ_instrument:
 			hi = NOTES.index(region['hikey'])
 			region['notes'] = range(lo, hi + 1)
 			region.load_audio(cwd)
-			region['delta_sample'] = tempdir + str(timeit.default_timer()) + '.dat'
-			region['sample_length'] = len(region['sample_data'])
-			df = open(region['delta_sample'], 'w')
-
-			if region['sample_bittype'] == 1:
-				df.write(struct.pack('<{0}B'.format(len(region['sample_data'])), *(region['sample_data'])))
-			elif region['sample_bittype'] == 2:
-				df.write(struct.pack('<{0}H'.format(len(region['sample_data'])), *(region['sample_data'])))
-			elif region['sample_bittype'] == 3:
-				for byte in region['sample_data']:
-					df.write(struct.pack('<3B', byte & 0xFF0000 >> 0xFFFF, byte & 0xFF00 >> 0xFF, byte & 0xFF))
-			elif region['sample_bittype'] == 4:
-				df.write(struct.pack('<{0}I'.format(len(region['sample_data'])), *(region['sample_data'])))
-
-			df.close()
-			region['sample_data'] = ''
-			del region['sample_data']
 
 	def open(self, filename):
 		self.filename = filename
@@ -361,9 +442,9 @@ class SFZ_instrument:
 			self.last_chunk = segments
 
 
-def magic(filename, cwd, tempdir):
+def magic(filename, cwd):
 	start = timeit.default_timer()
-	instrument = SFZ_instrument(cwd + filename, cwd, tempdir)
+	instrument = SFZ_instrument(cwd + filename, cwd)
 
 	fp = open(cwd + filename[:-4] + '.temp.xi', 'w')
 	# create xi file
@@ -521,7 +602,7 @@ def magic(filename, cwd, tempdir):
 	fp.write(struct.pack('<h', len(instrument.regions)))  # number of samples
 
 	for region in instrument.regions:
-		fp.write(struct.pack('<i', region['sample_bittype'] * region['sample_length']))  # sample length
+		fp.write(struct.pack('<i', region['sample_length'] * region['sample_bittype'] * region['sample_channels']))  # sample length
 		fp.write(struct.pack('<2i', 0, 0))  # sample loop start and end
 		# volume
 		if 'volume' in region:
@@ -555,13 +636,7 @@ def magic(filename, cwd, tempdir):
 		fp.write(struct.pack('<22s', sample_name))
 
 	for region in instrument.regions:
-		df = open(region['delta_sample'], 'r')
-		fp.write(df.read())
-		df.close()
-
-		os.remove(region['delta_sample'])
-		region = {}
-		del region
+		write_delta_sample(region['sample_path'], fp)
 
 	print(len(instrument.regions), 'samples')
 	print(int(fp.tell() / 1024), 'kB written in file "', filename, '" during', timeit.default_timer() - start, 'seconds')
@@ -582,30 +657,22 @@ def main(argv):
 		print('No input file specified')
 		return 2
 
-	try:
-		cwd = os.getcwd() + '/'
-		tempdir = tempfile.mkdtemp()
+	cwd = os.getcwd() + os.sep
 
-		start_time = timeit.default_timer()
-		converted = 0
-		for arg in argv[1:]:
-			if not os.path.exists(cwd + arg[:-4] + '.xi') or force:
-				print('-' * 80)
-				print('Converting "', arg, '"')
-				print('-' * 80)
-				magic(arg, cwd, tempdir)
-				converted += 1
-			else:
-				print('File', arg, 'is already converted!')
+	start_time = timeit.default_timer()
+	converted = 0
+	for arg in argv[1:]:
+		if not os.path.exists(cwd + arg[:-4] + '.xi') or force:
+			print('-' * 80)
+			print('Converting "', arg, '"')
+			print('-' * 80)
+			magic(arg, cwd)
+			converted += 1
+		else:
+			print('File', arg, 'is already converted!')
 
-		print('')
-		print(converted, 'files converted in', timeit.default_timer() - start_time, 'seconds')
-	finally:
-		try:
-			shutil.rmtree(tempdir)	# delete directory
-		except OSError as e:
-			if e.errno != 2:  # code 2 - no such file or directory
-				raise
+	print('')
+	print(converted, 'files converted in', timeit.default_timer() - start_time, 'seconds')
 
 
 if __name__ == '__main__':
