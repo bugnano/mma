@@ -34,6 +34,7 @@ import wave
 import sndhdr
 import timeit
 import math
+import argparse
 
 
 __version__ = '0.0.1'
@@ -53,6 +54,7 @@ REL_NOTE_ZERO = 'c4'
 
 SAMPLE_TYPE_8BIT = 0x00
 SAMPLE_TYPE_16BIT = 0x10
+SAMPLE_TYPE_32BIT = 0x20	# Non-standard (Samplicity v0.4 uses 0x10, but how is the tracker supposed to know whether it's 16 or 32 bit?)
 SAMPLE_TYPE_MONO = 0x00
 SAMPLE_TYPE_STEREO = 0x40	# Non-standard
 SAMPLE_TYPE_NO_LOOP = 0x00
@@ -60,14 +62,14 @@ SAMPLE_TYPE_FWD_LOOP = 0x01
 SAMPLE_TYPE_BIDI_LOOP = 0x02
 
 XI_VERSION_FT2 = 0x0102
-XI_VERSION_PSYTEXX = 0x5050	# Non-standard
+XI_VERSION_PSYTEXX = 0x0000	# Non-standard (In theory it is 0x5050, but Samplicity v0.4 uses 0x0000)
 
 
 def pad_name(name, length, pad=' ', dir='right'):
 	if dir == 'right':
-		return (name + pad * length)[:length]
+		return ''.join([name, pad * length])[:length]
 	else:
-		return (name + pad * length)[-length:]
+		return ''.join([name, pad * length])[-length:]
 
 
 def wrap(text, width):
@@ -79,7 +81,7 @@ def wrap(text, width):
 	return reduce(lambda line, word, width=width: '%s%s%s' % (line, ' \n'[(len(line) - line.rfind('\n') - 1 + len(word.split('\n', 1)[0]) >= width)], word), text.split(' '))
 
 
-def identify_sample(sample_path):
+def identify_sample(sample_path, options):
 	what = sndhdr.what(sample_path)
 	if not what:
 		print('This is not wav file:', sample_path)
@@ -110,25 +112,38 @@ def identify_sample(sample_path):
 		print('Unknown frame count for wav file:', sample_path)
 		sys.exit(1)
 
+	xi_version = XI_VERSION_FT2
+
 	if bits_per_sample == 8:
 		sample_type |= SAMPLE_TYPE_8BIT
 	elif bits_per_sample == 16:
 		sample_type |= SAMPLE_TYPE_16BIT
 	else:
-		print('/' * 80)
-		print('{0}-bit samples are not supported'.format(bits_per_sample))
-		print('/' * 80)
-		sys.exit(1)
+		if (bits_per_sample == 32) and (options.enable_32_bit):
+			sample_type |= SAMPLE_TYPE_32BIT
+			xi_version = XI_VERSION_PSYTEXX
+		else:
+			print('/' * 80)
+			print('{0}-bit samples are not supported'.format(bits_per_sample))
+			if bits_per_sample == 32:
+				print('Use the --enable-32-bit option to enable non-standard 32-bit samples')
+			print('/' * 80)
+			sys.exit(1)
 
-	xi_version = XI_VERSION_FT2
 	if channels == 1:
 		text_type = 'mono'
 		sample_type |= SAMPLE_TYPE_MONO
 	elif channels == 2:
 		text_type = 'stereo'
-		sample_type |= SAMPLE_TYPE_STEREO
-		xi_version = XI_VERSION_PSYTEXX
-		print('stereo samples are not supported')
+		if options.enable_stereo:
+			sample_type |= SAMPLE_TYPE_STEREO
+			xi_version = XI_VERSION_PSYTEXX
+		else:
+			print('/' * 80)
+			print('stereo samples are not supported')
+			print('Use the --enable-stereo option to enable non-standard stereo samples')
+			print('/' * 80)
+			sys.exit(1)
 	else:
 		text_type = '{0}-channels'.format(channels)
 		print('/' * 80)
@@ -151,6 +166,9 @@ def write_delta_sample(sample_path, fp):
 	elif byte == 2:
 		bittype = 'H'
 		scissors = 0xFFFF
+	elif byte == 4:
+		bittype = 'I'
+		scissors = 0xFFFFFFFF
 	else:
 		print('/' * 80)
 		print('{0}-bit samples are not supported'.format(byte * 8))
@@ -176,7 +194,7 @@ def write_delta_sample(sample_path, fp):
 
 
 # FixedMUL, getc4spd and convertc4spd are magic functions taken from the MilkyTracker source code
-mp_sbyte = lambda x: struct.unpack('<b', chr(int(x) & 0xFF))[0]
+mp_sbyte = lambda x: struct.unpack('<b', struct.pack('<B', (int(x) & 0xFF)))[0]
 
 def FixedMUL(a, b):
 	return ((a * b) >> 16)
@@ -360,15 +378,13 @@ class SFZ_region(dict):
 			if key in self and self[key].isdigit():
 				self[key] = NOTES[int(self[key])]
 
-	def load_audio(self, cwd):
+	def load_audio(self, cwd, options):
 		self['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, path_local(self['sample']))))
-		(self['sample_rate'], self['sample_bittype'], self['sample_channels'], self['sample_length'], self['sample_xi_version'], self['sample_type']) = identify_sample(self['sample_path'])
+		(self['sample_rate'], self['sample_bittype'], self['sample_channels'], self['sample_length'], self['sample_xi_version'], self['sample_type']) = identify_sample(self['sample_path'], options)
 
 
 class SFZ_instrument:
-	def __init__(self, filename, cwd):
-		self.open(filename)
-
+	def __init__(self, filename, options):
 		self.regions = []
 		self.group = {}
 		self.last_chunk = None
@@ -376,6 +392,9 @@ class SFZ_instrument:
 		self.in_region = -1
 		self.in_group = False
 
+		cwd = os.path.dirname(filename)
+
+		self.open(filename)
 		line = self.read()
 		while len(line) > 0:
 			self.parse_line(line)
@@ -387,7 +406,7 @@ class SFZ_instrument:
 			lo = NOTES.index(region['lokey'])
 			hi = NOTES.index(region['hikey'])
 			region['notes'] = range(lo, hi + 1)
-			region.load_audio(cwd)
+			region.load_audio(cwd, options)
 
 	def open(self, filename):
 		self.filename = filename
@@ -442,25 +461,36 @@ class SFZ_instrument:
 			self.last_chunk = segments
 
 
-def magic(filename, cwd):
+def magic(filename, xi_filename, options):
 	start = timeit.default_timer()
-	instrument = SFZ_instrument(cwd + filename, cwd)
 
-	fp = open(cwd + filename[:-4] + '.temp.xi', 'w')
+	head, tail = os.path.split(filename)
+	root, ext = os.path.splitext(tail)
+
+	instrument = SFZ_instrument(filename, options)
+
+	temp_filename = ''.join([xi_filename, '.temp'])
+
 	# create xi file
+	fp = open(temp_filename, 'wb')
+
+	# File header
 	fp.write(struct.pack('<21s22sb20sh',
-		'Extended Instrument: ', (filename[:-4] + ' ' * 22)[:22], 0x1a,
-		pad_name(VERSION, 20), 0x0102))
+		'Extended Instrument: ',
+		pad_name(root, 22),
+		0x1A,
+		pad_name(VERSION, 20),
+		0x0102
+	))
 
 	notes_samples = [0 for i in range(96)]
 
 	overlapping = []
 	ignored = []
 
-
-	if len(instrument.regions) >= 16:
-		print('Too many samples in file:', filename, ' (no more than 16 samples supported)')
-		instrument.regions = instrument.regions[:16]
+	if len(instrument.regions) >= options.max_samples:
+		print('Too many samples in file:', tail, '(no more than {0} samples supported)'.format(options.max_samples))
+		instrument.regions = instrument.regions[:options.max_samples]
 
 	i = 0
 	for region in instrument.regions:
@@ -635,41 +665,61 @@ def magic(filename, cwd):
 		fp.write(struct.pack('<b', len(sample_name.strip(' '))))
 		fp.write(struct.pack('<22s', sample_name))
 
+	# Sample data
 	for region in instrument.regions:
 		write_delta_sample(region['sample_path'], fp)
 
 	print(len(instrument.regions), 'samples')
-	print(int(fp.tell() / 1024), 'kB written in file "', filename, '" during', timeit.default_timer() - start, 'seconds')
+	print(int(fp.tell() / 1024), 'kB written in file "', os.path.basename(xi_filename), '" during', timeit.default_timer() - start, 'seconds')
+
 	fp.close()
-	instrument = {}
-	del instrument
-	os.rename(cwd + filename[:-4] + '.temp.xi', cwd + filename[:-4] + '.xi')
+
+	if os.path.exists(xi_filename):
+		os.remove(xi_filename)
+
+	os.rename(temp_filename, xi_filename)
 
 
 def main(argv):
-	if '--force' in argv:
-		force = True
-		del argv[argv.index('--force')]
-	else:
-		force = False
+	parser = argparse.ArgumentParser(prog=argv[0], description='Convert .sfz samples to .xi format')
+	parser.add_argument('--version', action='version', version=VERSION)
+	parser.add_argument('-f', '--force', help='force reconversion', action='store_true')
+	parser.add_argument('-d', '--output-dir', help='set output directory')
+	parser.add_argument('-m', '--max-samples', help='set maximum number of samples (default: 16)', type=int, default=16)
+	parser.add_argument('-s', '--enable-stereo', help='enable support for stereo samples', action='store_true')
+	parser.add_argument('-4', '--enable-32-bit', help='enable support for 32-bit samples', action='store_true')
+	parser.add_argument('sfz_file', help='sfz file(s) to convert', nargs='+')
+	options = parser.parse_args(argv[1:])
 
-	if len(argv) < 2:
-		print('No input file specified')
+	if not options.output_dir:
+		options.output_dir = os.getcwd()
+	else:
+		options.output_dir = os.path.normpath(options.output_dir)
+
+	if not os.path.isdir(options.output_dir):
+		print('ERROR: Invalid output directory')
 		return 2
 
-	cwd = os.getcwd() + os.sep
+	# As there are only 96 notes in the instrument header and at most 1 sample per note,
+	# it doesn't make any sense to support more than 96 samples per instrument
+	if (options.max_samples < 1) or (options.max_samples > 96):
+		print('ERROR: Invalid maximum number of samples (valid from 1 to 96)')
+		return 2
 
 	start_time = timeit.default_timer()
 	converted = 0
-	for arg in argv[1:]:
-		if not os.path.exists(cwd + arg[:-4] + '.xi') or force:
+	for arg in options.sfz_file:
+		head, tail = os.path.split(arg)
+		root, ext = os.path.splitext(tail)
+		xi_filename = os.path.join(options.output_dir, ''.join([root, '.xi']))
+		if (not os.path.exists(xi_filename)) or options.force:
 			print('-' * 80)
-			print('Converting "', arg, '"')
+			print('Converting "', tail, '"')
 			print('-' * 80)
-			magic(arg, cwd)
+			magic(arg, xi_filename, options)
 			converted += 1
 		else:
-			print('File', arg, 'is already converted!')
+			print('File', tail, 'is already converted!')
 
 	print('')
 	print(converted, 'files converted in', timeit.default_timer() - start_time, 'seconds')

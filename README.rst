@@ -29,12 +29,11 @@ Known Issues
 
 This version of MMA has the following known issues:
 
-- Stereo samples are non-standard and only waste space when used in MilkyTracker_, as it automatically converts them to mono, so support for stereo samples will be removed in a future version
-- The XI format supports only 8 and 16 bit samples, but at the moment 8 bit samples are broken. 24 and 32 bit sample support will be removed, as it doesn't work in MilkyTracker_
-- The maximum number of samples-per-instrument supported by MilkyTracker_ is 16, not 128, so it will be reduced to 16 in a future version
+- The maximum number of samples-per-instrument supported by MilkyTracker_ is 16, not 128, so now it is reduced to 16,
+  but a more sane logic could be applied when reducing the number of samples
 - Sample looping is not supported yet
 
-Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 16 bit mono wav format.
+Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 8 bit or 16 bit mono wav format.
 
 Formats
 =======
@@ -134,7 +133,7 @@ again. To force reconversion, add ``--force`` attribute:
 
 .. code-block:: bash
 
-    python "<PATH TO MMA FOLDER>/mma.py" "<SAMPLE NAME>.sfz" --force
+    python "<PATH TO MMA FOLDER>/mma.py" --force "<SAMPLE NAME>.sfz"
 
 Package
 =======
