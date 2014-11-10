@@ -35,22 +35,32 @@ import sndhdr
 import timeit
 import math
 import argparse
+import pprint
 
 
 __version__ = '0.0.1'
 
 VERSION = ''.join(['MMA v', __version__])
 
+# MIDI notes go from 0 (C-1) to 127 (G9)
 NOTES = []
 scale = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b']
-for i in range(11):
-	NOTES.extend([(note + str(i)) for note in scale])
+for octave in range(-1, 10):
+	NOTES.extend([''.join([note, str(octave)]) for note in scale])
 del scale
-del i
+del octave
 del note
 
-# The relative note with value 0 (C-4), in MIDI notation
-REL_NOTE_ZERO = 'c4'
+# The first of the 96 notes (C0)
+XI_FIRST_NOTE = NOTES.index('c0')
+
+# The relative note with value 0 (C4)
+XI_REL_NOTE_ZERO = NOTES.index('c4')
+
+# Default values for SFZ parameters, as specified in the document (as a numeric value)
+DEFAULT_LOKEY = 0
+DEFAULT_HIKEY = 127
+DEFAULT_PITCH_KEYCENTER = 60
 
 SAMPLE_TYPE_8BIT = 0x00
 SAMPLE_TYPE_16BIT = 0x10
@@ -70,15 +80,6 @@ def pad_name(name, length, pad=' ', dir='right'):
 		return ''.join([name, pad * length])[:length]
 	else:
 		return ''.join([name, pad * length])[-length:]
-
-
-def wrap(text, width):
-	'''
-	A word-wrap function that preserves existing line breaks
-	and most spaces in the text. Expects that existing line
-	breaks are posix newlines (\n).
-	'''
-	return reduce(lambda line, word, width=width: '%s%s%s' % (line, ' \n'[(len(line) - line.rfind('\n') - 1 + len(word.split('\n', 1)[0]) >= width)], word), text.split(' '))
 
 
 def identify_sample(sample_path, options):
@@ -153,7 +154,14 @@ def identify_sample(sample_path, options):
 
 	print('*', bits_per_sample, 'bit', text_type, 'sample "', sample_path, '"', int((byte * frames_count * channels) / 1024), 'kB')
 
-	return (sampling_rate, byte, channels, frames_count, xi_version, sample_type)
+	return {
+		'sampling_rate': sampling_rate,
+		'sample_bittype': byte,
+		'channels': channels,
+		'sample_length': frames_count,
+		'sample_type': sample_type,
+		'xi_version': xi_version,
+	}
 
 
 def write_delta_sample(sample_path, fp):
@@ -360,105 +368,139 @@ def path_local(path):
 		return path.replace('\\', os.sep)
 
 
-class SFZ_region(dict):
-	def validate(self):
-		if 'tune' not in self:
-			self['tune'] = 0
-		if 'key' in self:
-			self['pitch_keycenter'] = self['key']
-			self['lokey'] = self['key']
-			self['hikey'] = self['key']
-		if 'pitch_keycenter' in self:
-			if 'lokey' not in self:
-				self['lokey'] = self['pitch_keycenter']
-			if 'hikey' not in self:
-				self['hikey'] = self['pitch_keycenter']
+class SFZ_region(object):
+	def __init__(self):
+		self.sfz_params = {}
+		self.wav_params = {}
 
-		for key in ('pitch_keycenter', 'lokey', 'hikey'):
-			if key in self and self[key].isdigit():
-				self[key] = NOTES[int(self[key])]
+	def validate(self):
+		# A region without a sample is useless
+		if 'sample' not in self.sfz_params:
+			return False
+
+		if 'tune' not in self.sfz_params:
+			self.sfz_params['tune'] = 0
+
+		# The key parameter sets the lokey, hikey, and pitch_keycenter to the same value
+		if 'key' in self.sfz_params:
+			self.sfz_params['lokey'] = self.sfz_params['key']
+			self.sfz_params['hikey'] = self.sfz_params['key']
+			self.sfz_params['pitch_keycenter'] = self.sfz_params['key']
+
+		# Convert note names to numeric values
+		for param in ('lokey', 'hikey', 'pitch_keycenter'):
+			value = self.sfz_params[param]
+			try:
+				if self.sfz_params[param].isdigit():
+					self.sfz_params[param] = int(value)
+				else:
+					self.sfz_params[param] = NOTES.index(value.lower())
+
+				if (self.sfz_params[param] < 0) or (self.sfz_params[param] >= len(NOTES)):
+					raise ValueError
+			except ValueError:
+				print('ERROR: Invalid {} value for sample {}: {}'.format(param, self.sfz_params['sample'], value))
+				sys.exit(1)
+
+		# lokey, hikey, and pitch_keycenter have a default value if not set
+		if 'lokey' not in self.sfz_params:
+			self.sfz_params['lokey'] = DEFAULT_LOKEY
+
+		if 'hikey' not in self.sfz_params:
+			self.sfz_params['hikey'] = DEFAULT_HIKEY
+
+		if 'pitch_keycenter' not in self.sfz_params:
+			self.sfz_params['pitch_keycenter'] = DEFAULT_PITCH_KEYCENTER
+
+		return True
 
 	def load_audio(self, cwd, options):
-		self['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, path_local(self['sample']))))
-		(self['sample_rate'], self['sample_bittype'], self['sample_channels'], self['sample_length'], self['sample_xi_version'], self['sample_type']) = identify_sample(self['sample_path'], options)
+		self.wav_params['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, path_local(self.sfz_params['sample']))))
+		self.wav_params.update(identify_sample(self.wav_params['sample_path'], options))
 
 
-class SFZ_instrument:
-	def __init__(self, filename, options):
-		self.regions = []
-		self.group = {}
-		self.last_chunk = None
-		self.curr = -1
-		self.in_region = -1
-		self.in_group = False
+def parse_sfz(filename, options):
+	regions = []
 
-		cwd = os.path.dirname(filename)
+	group_params = {}
+	last_chunk = None
+	curr_region = None
+	in_region = False
+	in_group = False
 
-		self.open(filename)
-		line = self.read()
-		while len(line) > 0:
-			self.parse_line(line)
-			line = self.read()
-
-		# complete samples info
-		for region in self.regions:
-			region.validate()
-			lo = NOTES.index(region['lokey'])
-			hi = NOTES.index(region['hikey'])
-			region['notes'] = range(lo, hi + 1)
-			region.load_audio(cwd, options)
-
-	def open(self, filename):
-		self.filename = filename
-		self.fp = open(filename, 'r')
-		return self.fp
-
-	def close(self):
-		self.fp.close()
-
-	def read(self):
-		return self.fp.readline()
-
-	def parse_line(self, line):
-		line = line.strip(' \r\n')
-		comment_pos = line.find('//')  # remove comments
+	fp = open(filename, 'rU')
+	for line in fp:
+		# remove comments
+		comment_pos = line.find('//')
 		if comment_pos >= 0:
 			line = line[:comment_pos]
-		if len(line) == 0:
-			return	# blank line - nothing to do here
+
+		line = line.strip()
+
+		# blank line - nothing to do here
+		if not line:
+			continue
+
 		# now split line in chunks by spaces
 		chunks = line.split(' ')
 		for chunk in chunks:
-			if len(chunk) > 0:
-				self.parse_chunk(chunk)
+			if chunk == '<group>':
+				# it's a group - lets remember the following
+				last_chunk = None
+				in_group = True
+				in_region = False
+				group_params = {}
+			elif chunk == '<region>':
+				# it's a region - save the following and add group data
+				curr_region = SFZ_region()
+				regions.append(curr_region)
+				if in_group:
+					curr_region.sfz_params.update(group_params)
 
-	def parse_chunk(self, chunk):
-		if chunk == '<group>':	# it's a group - lets remember the following
-			self.in_group = True
-			self.in_region = False
-			self.group = {}
-		elif chunk == '<region>':  # it's a region - save the following and add group data
-			self.regions.append(SFZ_region())
-			self.curr += 1
-			if self.in_group:
-				self.regions[self.curr].update(self.group)
+				last_chunk = None
+				in_region = True
+			else:
+				# this should be the assignment
+				segments = chunk.split('=', 1)
+				if len(segments) != 2:
+					# maybe, we can just append this data to the previous chunk
+					if last_chunk is not None:
+						curr_region.sfz_params[last_chunk[0]] = ' '.join([curr_region.sfz_params[last_chunk[0]], segments[0]])
+						segments = (last_chunk[0], curr_region.sfz_params[last_chunk[0]])
+					else:
+						print('Ambiguous spaces in SFZ file:', filename)
+						sys.exit(1)
 
-			self.in_region = True
-		else:  # this should be the assignment
-			segments = chunk.split('=')
-			if len(segments) != 2:
-				# maybe, we can just append this data to the previous chunk
-				if self.last_chunk is not None:
-					self.regions[self.curr][self.last_chunk[0]] += ' ' + segments[0]
-					segments = (self.last_chunk[0], self.regions[self.curr][self.last_chunk[0]])
-				else:
-					print('Ambiguous spaces in SFZ file:', self.filename)
-					sys.exit(1)
-			if self.in_region:
-				self.regions[self.curr][segments[0]] = segments[1]
-			elif self.in_group:
-				self.group[segments[0]] = segments[1]
-			self.last_chunk = segments
+				if in_region:
+					curr_region.sfz_params[segments[0]] = segments[1]
+				elif in_group:
+					group_params[segments[0]] = segments[1]
+
+				last_chunk = segments
+
+	fp.close()
+
+	cwd = os.path.dirname(filename)
+
+	# complete samples info
+	delete_regions = []
+	for (i, region) in enumerate(regions):
+		if region.validate():
+			region.load_audio(cwd, options)
+		else:
+			# Invalid region, mark it for deletion (last index first)
+			delete_regions.insert(0, i)
+
+	# Delete invalid regions
+	if delete_regions:
+		print('/' * 80)
+		print('Notice: some regions are invalid and ignored')
+		print('/' * 80)
+
+		for i in delete_regions:
+			del regions[i]
+
+	return regions
 
 
 def magic(filename, xi_filename, options):
@@ -467,7 +509,7 @@ def magic(filename, xi_filename, options):
 	head, tail = os.path.split(filename)
 	root, ext = os.path.splitext(tail)
 
-	instrument = SFZ_instrument(filename, options)
+	regions = parse_sfz(filename, options)
 
 	temp_filename = ''.join([xi_filename, '.temp'])
 
@@ -483,37 +525,40 @@ def magic(filename, xi_filename, options):
 		0x0102
 	))
 
-	notes_samples = [0 for i in range(96)]
-
-	overlapping = []
-	ignored = []
-
-	if len(instrument.regions) >= options.max_samples:
+	if len(regions) >= options.max_samples:
 		print('Too many samples in file:', tail, '(no more than {0} samples supported)'.format(options.max_samples))
-		instrument.regions = instrument.regions[:options.max_samples]
+		regions = regions[:options.max_samples]
 
-	i = 0
-	for region in instrument.regions:
-		for note in region['notes']:
-			if note < len(notes_samples) and note > -1:
-				if notes_samples[note] != 0:
-					overlapping.append(NOTES[note])
-				notes_samples[note] = i
+	notes_samples = [0] * 96
+	overlapping = set()
+	ignored = set()
+	for (i, region) in enumerate(regions):
+		lo = region.sfz_params['lokey']
+		hi = region.sfz_params['hikey']
+		for note in range(lo, hi + 1):
+			xi_note = note - XI_FIRST_NOTE
+			if (xi_note >= 0) and (xi_note < len(notes_samples)):
+				if notes_samples[xi_note]:
+					overlapping.add(note)
+				else:
+					notes_samples[xi_note] = i
 			else:
-				ignored.append(NOTES[note])
-		i += 1
+				ignored.add(note)
 
-	if len(overlapping) > 0:
+	if overlapping:
 		print('/' * 80)
-		print(wrap('Notice: some regions are overlapping and would be overwritten', 80))
-		print(wrap(str(overlapping), 80))
-		print('/' * 80)
-	if len(ignored) > 0:
-		print('/' * 80)
-		print(wrap('Notice: some notes are out of range and ignored', 80))
-		print(wrap(str(ignored), 80))
+		print('Notice: some regions are overlapping and would be overwritten')
+		pprint.pprint([NOTES[x] for x in sorted(overlapping)])
 		print('/' * 80)
 
+	if ignored:
+		print('/' * 80)
+		print('Notice: some notes are out of range and ignored')
+		pprint.pprint([NOTES[x] for x in sorted(ignored)])
+		print('/' * 80)
+
+	# Inst header
+	# Sample number for notes 1..96
 	fp.write(struct.pack('<96b', *(notes_samples)))
 
 	stt = 50  # seconds-to-ticks converter
@@ -522,7 +567,7 @@ def magic(filename, xi_filename, options):
 	volume_points = 0
 	volume_ticks = 0
 	volume_envelope = []
-	if 'ampeg_attack' not in region:
+	if 'ampeg_attack' not in region.sfz_params:
 		volume_level = 0x40
 	else:
 		volume_level = 0
@@ -530,8 +575,8 @@ def magic(filename, xi_filename, options):
 
 	#fp.write(struct.pack('<h', volume_ticks))
 	volume_envelope.append(volume_ticks)
-	if 'ampeg_delay' in region:
-		volume_ticks += float(region['ampeg_delay']) * stt
+	if 'ampeg_delay' in region.sfz_params:
+		volume_ticks += float(region.sfz_params['ampeg_delay']) * stt
 		volume_points += 1
 		volume_level = 0
 
@@ -540,18 +585,18 @@ def magic(filename, xi_filename, options):
 		#fp.write(struct.pack('<h', volume_ticks))
 		volume_envelope.append(volume_ticks)
 
-	if 'ampeg_start' in region:
-		volume_level = int(float(region['ampeg_start']) / 100 * stt)
+	if 'ampeg_start' in region.sfz_params:
+		volume_level = int(float(region.sfz_params['ampeg_start']) / 100 * stt)
 
-	if 'ampeg_attack' in region:
-		volume_ticks += int(float(region['ampeg_attack']) * stt)
+	if 'ampeg_attack' in region.sfz_params:
+		volume_ticks += int(float(region.sfz_params['ampeg_attack']) * stt)
 
 	#fp.write(struct.pack('<h', volume_level))
 	volume_envelope.append(volume_level)
 	volume_points += 1
 
-	if 'ampeg_hold' in region:
-		volume_ticks += int(float(region['ampeg_hold']) * stt)
+	if 'ampeg_hold' in region.sfz_params:
+		volume_ticks += int(float(region.sfz_params['ampeg_hold']) * stt)
 	else:
 		volume_level = 0x40
 	#fp.write(struct.pack('<h', volume_ticks))
@@ -560,22 +605,22 @@ def magic(filename, xi_filename, options):
 	volume_envelope.append(volume_level)
 	volume_points += 1
 
-	if 'ampeg_decay' in region:
-		volume_ticks += int(float(region['ampeg_decay']) * stt)
+	if 'ampeg_decay' in region.sfz_params:
+		volume_ticks += int(float(region.sfz_params['ampeg_decay']) * stt)
 		#fp.write(struct.pack('<h', volume_ticks))
 		volume_envelope.append(volume_ticks)
 
-		if 'ampeg_sustain' in region:
-			#fp.write(struct.pack('<h', int(float(region['ampeg_sustain']) / 100 * stt)))
-			volume_envelope.append(int(float(region['ampeg_sustain']) / 100 * stt))
+		if 'ampeg_sustain' in region.sfz_params:
+			#fp.write(struct.pack('<h', int(float(region.sfz_params['ampeg_sustain']) / 100 * stt)))
+			volume_envelope.append(int(float(region.sfz_params['ampeg_sustain']) / 100 * stt))
 		else:
 			#fp.write(struct.pack('<h', 0))
 			volume_envelope.append(0)
 
 		volume_points += 1
 
-	if 'ampeg_sustain' in region:
-		volume_level = int(float(region['ampeg_sustain']) / 100 * stt)
+	if 'ampeg_sustain' in region.sfz_params:
+		volume_level = int(float(region.sfz_params['ampeg_sustain']) / 100 * stt)
 		#fp.write(struct.pack('<h', volume_ticks))
 		volume_envelope.append(volume_ticks)
 		#fp.write(struct.pack('<h', volume_level))
@@ -583,8 +628,8 @@ def magic(filename, xi_filename, options):
 		volume_points += 1
 		vol_sustain_point = volume_points - 1
 
-	if 'ampeg_release' in region:
-		volume_ticks += int(float(region['ampeg_release']) * stt)
+	if 'ampeg_release' in region.sfz_params:
+		volume_ticks += int(float(region.sfz_params['ampeg_release']) * stt)
 		volume_level = 0x0
 		#fp.write(struct.pack('<h', volume_ticks))
 		volume_envelope.append(volume_ticks)
@@ -629,47 +674,46 @@ def magic(filename, xi_filename, options):
 
 	fp.write(struct.pack('<h', 0))  # volume fadeout
 	fp.write(struct.pack('<22b', *(0 for i in range(22))))  # extended data
-	fp.write(struct.pack('<h', len(instrument.regions)))  # number of samples
+	fp.write(struct.pack('<h', len(regions)))  # number of samples
 
-	for region in instrument.regions:
-		fp.write(struct.pack('<i', region['sample_length'] * region['sample_bittype'] * region['sample_channels']))  # sample length
+	for region in regions:
+		fp.write(struct.pack('<i', region.wav_params['sample_length'] * region.wav_params['sample_bittype'] * region.wav_params['channels']))  # sample length
 		fp.write(struct.pack('<2i', 0, 0))  # sample loop start and end
 		# volume
-		if 'volume' in region:
-			fp.write(struct.pack('<B', math.floor(255 * math.exp(float(region['volume']) / 10) / math.exp(0.6))))	# 'cause volume is in dB
+		if 'volume' in region.sfz_params:
+			fp.write(struct.pack('<B', math.floor(255 * math.exp(float(region.sfz_params['volume']) / 10) / math.exp(0.6))))	# 'cause volume is in dB
 		else:
 			fp.write(struct.pack('<B', 255))
 
 		# Get the relative note and finetune based on the sampling rate of the sample
-		finetune, relnote = convertc4spd(region['sample_rate'])
-		relnote += NOTES.index(REL_NOTE_ZERO)
+		finetune, relnote = convertc4spd(region.wav_params['sampling_rate'])
+		relnote += XI_REL_NOTE_ZERO
 
-		fp.write(struct.pack('<b', finetune + int(region['tune'])))  # finetune (signed!)
+		fp.write(struct.pack('<b', finetune + int(region.sfz_params['tune'])))  # finetune (signed!)
 
-		fp.write(struct.pack('<b', region['sample_type']))  # sample type
+		fp.write(struct.pack('<b', region.wav_params['sample_type']))  # sample type
 
 		#panning (unsigned!)
-		if 'pan' in region:
-			fp.write(struct.pack('<B', (float(region['pan']) + 100) * 255 / 200))
+		if 'pan' in region.sfz_params:
+			fp.write(struct.pack('<B', (float(region.sfz_params['pan']) + 100) * 255 / 200))
 		else:
 			fp.write(struct.pack('<B', 128))
 
 		# relative note - transpose c4 ~ 00
-		if 'pitch_keycenter' in region:
-			fp.write(struct.pack('<b', relnote - NOTES.index(region['pitch_keycenter'])))
-		else:
-			fp.write(struct.pack('<b', relnote - NOTES.index(region['lokey'])))
+		fp.write(struct.pack('<b', relnote - region.sfz_params['pitch_keycenter']))
 
-		sample_name = pad_name(os.path.split(region['sample_path'])[1], 22)
+		# Sample Name, padded w/ zeroes
+		root, ext = os.path.splitext(os.path.basename(path_local(region.sfz_params['sample'])))
+		sample_name = pad_name(root, 22, '\0')
 
-		fp.write(struct.pack('<b', len(sample_name.strip(' '))))
+		fp.write(struct.pack('<b', len(sample_name.rstrip('\0'))))
 		fp.write(struct.pack('<22s', sample_name))
 
 	# Sample data
-	for region in instrument.regions:
-		write_delta_sample(region['sample_path'], fp)
+	for region in regions:
+		write_delta_sample(region.wav_params['sample_path'], fp)
 
-	print(len(instrument.regions), 'samples')
+	print(len(regions), 'samples')
 	print(int(fp.tell() / 1024), 'kB written in file "', os.path.basename(xi_filename), '" during', timeit.default_timer() - start, 'seconds')
 
 	fp.close()
