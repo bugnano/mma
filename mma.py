@@ -115,22 +115,6 @@ def identify_sample(sample_path, options):
 
 	xi_version = XI_VERSION_FT2
 
-	if bits_per_sample == 8:
-		sample_type |= SAMPLE_TYPE_8BIT
-	elif bits_per_sample == 16:
-		sample_type |= SAMPLE_TYPE_16BIT
-	else:
-		if (bits_per_sample == 32) and (options.enable_32_bit):
-			sample_type |= SAMPLE_TYPE_32BIT
-			xi_version = XI_VERSION_PSYTEXX
-		else:
-			print('/' * 80)
-			print('{0}-bit samples are not supported'.format(bits_per_sample))
-			if bits_per_sample == 32:
-				print('Use the --enable-32-bit option to enable non-standard 32-bit samples')
-			print('/' * 80)
-			sys.exit(1)
-
 	if channels == 1:
 		text_type = 'mono'
 		sample_type |= SAMPLE_TYPE_MONO
@@ -151,6 +135,23 @@ def identify_sample(sample_path, options):
 		print('{0}-channels samples are not supported'.format(channels))
 		print('/' * 80)
 		sys.exit(1)
+
+	# Check the bit rate last, as bit-rate conversion should be the last operation to apply on the samples
+	if bits_per_sample == 8:
+		sample_type |= SAMPLE_TYPE_8BIT
+	elif bits_per_sample == 16:
+		sample_type |= SAMPLE_TYPE_16BIT
+	else:
+		if (bits_per_sample == 32) and (options.enable_32_bit):
+			sample_type |= SAMPLE_TYPE_32BIT
+			xi_version = XI_VERSION_PSYTEXX
+		else:
+			print('/' * 80)
+			print('{0}-bit samples are not supported'.format(bits_per_sample))
+			if bits_per_sample == 32:
+				print('Use the --enable-32-bit option to enable non-standard 32-bit samples')
+			print('/' * 80)
+			sys.exit(1)
 
 	print('*', bits_per_sample, 'bit', text_type, 'sample "', sample_path, '"', int((byte * frames_count * channels) / 1024), 'kB')
 
@@ -368,6 +369,11 @@ def path_local(path):
 		return path.replace('\\', os.sep)
 
 
+# Function taken from http://stackoverflow.com/questions/9873626/choose-m-evenly-spaced-elements-from-a-sequence-of-length-n
+def get_n_indices(m, n):
+	return [(int((i * n) / m) + int(n / (2 * m))) for i in range(m)]
+
+
 class SFZ_region(object):
 	def __init__(self):
 		self.sfz_params = {}
@@ -389,18 +395,19 @@ class SFZ_region(object):
 
 		# Convert note names to numeric values
 		for param in ('lokey', 'hikey', 'pitch_keycenter'):
-			value = self.sfz_params[param]
-			try:
-				if self.sfz_params[param].isdigit():
-					self.sfz_params[param] = int(value)
-				else:
-					self.sfz_params[param] = NOTES.index(value.lower())
+			if param in self.sfz_params:
+				value = self.sfz_params[param]
+				try:
+					if self.sfz_params[param].isdigit():
+						self.sfz_params[param] = int(value)
+					else:
+						self.sfz_params[param] = NOTES.index(value.lower())
 
-				if (self.sfz_params[param] < 0) or (self.sfz_params[param] >= len(NOTES)):
-					raise ValueError
-			except ValueError:
-				print('ERROR: Invalid {} value for sample {}: {}'.format(param, self.sfz_params['sample'], value))
-				sys.exit(1)
+					if (self.sfz_params[param] < 0) or (self.sfz_params[param] >= len(NOTES)):
+						raise ValueError
+				except ValueError:
+					print('ERROR: Invalid {} value for sample {}: {}'.format(param, self.sfz_params['sample'], value))
+					sys.exit(1)
 
 		# lokey, hikey, and pitch_keycenter have a default value if not set
 		if 'lokey' not in self.sfz_params:
@@ -412,10 +419,16 @@ class SFZ_region(object):
 		if 'pitch_keycenter' not in self.sfz_params:
 			self.sfz_params['pitch_keycenter'] = DEFAULT_PITCH_KEYCENTER
 
+		if self.sfz_params['lokey'] > self.sfz_params['hikey']:
+			print('Notice: swapping lokey and hikey for region:', self.sfz_params['sample'])
+			self.sfz_params['hikey'], self.sfz_params['lokey'] = (self.sfz_params['lokey'], self.sfz_params['hikey'])
+
 		return True
 
 	def load_audio(self, cwd, options):
-		self.wav_params['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, path_local(self.sfz_params['sample']))))
+		# Strip the leading path separators for badly formed sfz files (the sfz standard mandates relative paths)
+		sample_path = path_local(self.sfz_params['sample']).lstrip(os.sep)
+		self.wav_params['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, sample_path)))
 		self.wav_params.update(identify_sample(self.wav_params['sample_path'], options))
 
 
@@ -428,8 +441,11 @@ def parse_sfz(filename, options):
 	in_region = False
 	in_group = False
 
+	lineno = 0
 	fp = open(filename, 'rU')
 	for line in fp:
+		lineno += 1
+
 		# remove comments
 		comment_pos = line.find('//')
 		if comment_pos >= 0:
@@ -444,6 +460,14 @@ def parse_sfz(filename, options):
 		# now split line in chunks by spaces
 		chunks = line.split(' ')
 		for chunk in chunks:
+			# As the sfz specs state, chunks beginning with the character '/' are comments,
+			# so let's not process the rest of the line.
+			# Notice that I look for the '/' character only as the first character of the chunk,
+			# in order to be compatible with the '/' character as a path separator.
+			# I don't know if the '/' path separator is supported in the sfz standard or not.
+			if chunk.startswith('/'):
+				break
+
 			if chunk == '<group>':
 				# it's a group - lets remember the following
 				last_chunk = None
@@ -468,7 +492,7 @@ def parse_sfz(filename, options):
 						curr_region.sfz_params[last_chunk[0]] = ' '.join([curr_region.sfz_params[last_chunk[0]], segments[0]])
 						segments = (last_chunk[0], curr_region.sfz_params[last_chunk[0]])
 					else:
-						print('Ambiguous spaces in SFZ file:', filename)
+						print('Ambiguous spaces in SFZ file:', filename, 'at line:', lineno)
 						sys.exit(1)
 
 				if in_region:
@@ -511,25 +535,100 @@ def magic(filename, xi_filename, options):
 
 	regions = parse_sfz(filename, options)
 
-	temp_filename = ''.join([xi_filename, '.temp'])
+	# The regions are sorted by lokey, and by the inverse of hikey, in order to have the regions
+	# that span the wider range of notes first
+	regions.sort(key=lambda x: [x.sfz_params['lokey'], -(x.sfz_params['hikey'])])
 
-	# create xi file
-	fp = open(temp_filename, 'wb')
+	# Delete fully overlapping regions
+	last_region = None
+	delete_regions = []
+	for (i, region) in enumerate(regions):
+		if last_region:
+			if (region.sfz_params['lokey'] >= last_region.sfz_params['lokey']) and (region.sfz_params['hikey'] <= last_region.sfz_params['hikey']):
+				# Overlapping region, mark it for deletion (last index first)
+				delete_regions.insert(0, i)
+			elif region.sfz_params['lokey'] > last_region.sfz_params['lokey']:
+				# lokey changed, mark this as the wider region
+				last_region = region
+		else:
+			last_region = region
 
-	# File header
-	fp.write(struct.pack('<21s22sb20sh',
-		'Extended Instrument: ',
-		pad_name(root, 22),
-		0x1A,
-		pad_name(VERSION, 20),
-		0x0102
-	))
+	if delete_regions:
+		overlapping = []
+		for i in delete_regions:
+			overlapping.insert(0, regions[i].sfz_params['sample'])
+			del regions[i]
 
-	if len(regions) >= options.max_samples:
+		print('/' * 80)
+		print('Notice: some regions are fully overlapping and would be overwritten')
+		print('Skipping:')
+		pprint.pprint(overlapping)
+		print('/' * 80)
+
+	if not regions:
+		print('No regions found in file:', tail)
+		return
+
+	if len(regions) > options.max_samples:
+		# Keep only the maximum allowed number of regions, but we are keeping them evenly spaced, in order
+		# to support the widest possible range of notes
+		if options.drumset:
+			# For drumsets we keep only the first samples
+			keep_regions = list(range(options.max_samples))
+		else:
+			# For normal instruments we evenly distribute samples
+			keep_regions = get_n_indices(options.max_samples, len(regions))
+
+		exclude_regions = [regions[i].sfz_params['sample'] for i in range(len(regions)) if i not in keep_regions]
+		regions = [regions[i] for i in keep_regions]
+
+		print('/' * 80)
 		print('Too many samples in file:', tail, '(no more than {0} samples supported)'.format(options.max_samples))
-		regions = regions[:options.max_samples]
+		print('Skipping:')
+		pprint.pprint(exclude_regions)
+		print('/' * 80)
 
 	notes_samples = [0] * 96
+
+	if not options.drumset:
+		# Extend the first and last regions in order to have all the notes covered
+		if regions[0].sfz_params['lokey'] > XI_FIRST_NOTE:
+			print('Notice: the first region has been extended from {} to {}'.format(NOTES[regions[0].sfz_params['lokey']], NOTES[XI_FIRST_NOTE]))
+			regions[0].sfz_params['lokey'] = XI_FIRST_NOTE
+
+		if regions[-1].sfz_params['hikey'] < (XI_FIRST_NOTE + (len(notes_samples) - 1)):
+			print('Notice: the last region has been extended from {} to {}'.format(NOTES[regions[-1].sfz_params['hikey']], NOTES[XI_FIRST_NOTE + (len(notes_samples) - 1)]))
+			regions[-1].sfz_params['hikey'] = XI_FIRST_NOTE + (len(notes_samples) - 1)
+
+	# Fill the gaps, and resolve the overlapping notes,
+	# and while we're here, find the right XI version number
+	xi_version = XI_VERSION_FT2
+	last_region = None
+	for region in regions:
+		adjust = False
+		if last_region:
+			if region.sfz_params['lokey'] <= last_region.sfz_params['hikey']:
+				# Overlapping regions
+				print('Notice: overlapping notes from {} to {}'.format(NOTES[region.sfz_params['lokey']], NOTES[last_region.sfz_params['hikey']]))
+				adjust = True
+			elif region.sfz_params['lokey'] > (last_region.sfz_params['hikey'] + 1):
+				# Gap between regions
+				print('Notice: gap between {} and {}'.format(NOTES[last_region.sfz_params['hikey']], NOTES[region.sfz_params['lokey']]))
+				adjust = True
+
+			# Both gaps and overlapping regions are fixed by extending them to a middle point
+			if adjust and not options.drumset:
+				midpoint = int((region.sfz_params['lokey'] + last_region.sfz_params['hikey']) / 2)
+				print('Adjusting to {}'.format(NOTES[midpoint]))
+				last_region.sfz_params['hikey'] = midpoint
+				region.sfz_params['lokey'] = midpoint + 1
+
+		if region.wav_params['xi_version'] != XI_VERSION_FT2:
+			xi_version = region.wav_params['xi_version']
+
+		last_region = region
+
+	# Map the samples to the corresponding notes
 	overlapping = set()
 	ignored = set()
 	for (i, region) in enumerate(regions):
@@ -557,9 +656,22 @@ def magic(filename, xi_filename, options):
 		pprint.pprint([NOTES[x] for x in sorted(ignored)])
 		print('/' * 80)
 
-	# Inst header
+	# create xi file
+	temp_filename = ''.join([xi_filename, '.temp'])
+	fp = open(temp_filename, 'wb')
+
+	# -------------------------------------------------------------- file header
+	fp.write(struct.pack('<21s22sb20sh',
+		'Extended Instrument: ',
+		pad_name(root, 22),
+		0x1A,
+		pad_name(VERSION, 20),
+		xi_version
+	))
+
+	# -------------------------------------------------------------- inst header
 	# Sample number for notes 1..96
-	fp.write(struct.pack('<96b', *(notes_samples)))
+	fp.write(struct.pack('<{}b'.format(len(notes_samples)), *(notes_samples)))
 
 	stt = 50  # seconds-to-ticks converter
 
@@ -732,6 +844,7 @@ def main(argv):
 	parser.add_argument('-m', '--max-samples', help='set maximum number of samples (default: 16)', type=int, default=16)
 	parser.add_argument('-s', '--enable-stereo', help='enable support for stereo samples', action='store_true')
 	parser.add_argument('-4', '--enable-32-bit', help='enable support for 32-bit samples', action='store_true')
+	parser.add_argument('-r', '--drumset', help='the specified sfz files are drumsets', action='store_true')
 	parser.add_argument('sfz_file', help='sfz file(s) to convert', nargs='+')
 	options = parser.parse_args(argv[1:])
 

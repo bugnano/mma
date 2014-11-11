@@ -29,8 +29,6 @@ Known Issues
 
 This version of MMA has the following known issues:
 
-- The maximum number of samples-per-instrument supported by MilkyTracker_ is 16, not 128, so now it is reduced to 16,
-  but a more sane logic could be applied when reducing the number of samples
 - Sample looping is not supported yet
 
 Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 8 bit or 16 bit mono wav format.
