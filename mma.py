@@ -36,6 +36,7 @@ import timeit
 import math
 import argparse
 import pprint
+import itertools
 
 
 __version__ = '0.0.1'
@@ -130,9 +131,9 @@ def identify_sample(sample_path, options):
 			print('/' * 80)
 			sys.exit(1)
 	else:
-		text_type = '{0}-channels'.format(channels)
+		text_type = '{}-channels'.format(channels)
 		print('/' * 80)
-		print('{0}-channels samples are not supported'.format(channels))
+		print('{}-channels samples are not supported'.format(channels))
 		print('/' * 80)
 		sys.exit(1)
 
@@ -147,7 +148,7 @@ def identify_sample(sample_path, options):
 			xi_version = XI_VERSION_PSYTEXX
 		else:
 			print('/' * 80)
-			print('{0}-bit samples are not supported'.format(bits_per_sample))
+			print('{}-bit samples are not supported'.format(bits_per_sample))
 			if bits_per_sample == 32:
 				print('Use the --enable-32-bit option to enable non-standard 32-bit samples')
 			print('/' * 80)
@@ -180,7 +181,7 @@ def write_delta_sample(sample_path, fp):
 		scissors = 0xFFFFFFFF
 	else:
 		print('/' * 80)
-		print('{0}-bit samples are not supported'.format(byte * 8))
+		print('{}-bit samples are not supported'.format(byte * 8))
 		print('/' * 80)
 		sys.exit(1)
 
@@ -190,7 +191,7 @@ def write_delta_sample(sample_path, fp):
 		if not r:
 			break
 
-		frames.extend(struct.unpack(''.join(['<{0}'.format(int(len(r) / byte)), bittype]), r))
+		frames.extend(struct.unpack(''.join(['<{}'.format(int(len(r) / byte)), bittype]), r))
 
 	sample.close()
 
@@ -583,7 +584,7 @@ def magic(filename, xi_filename, options):
 		regions = [regions[i] for i in keep_regions]
 
 		print('/' * 80)
-		print('Too many samples in file:', tail, '(no more than {0} samples supported)'.format(options.max_samples))
+		print('Too many samples in file:', tail, '(no more than {} samples supported)'.format(options.max_samples))
 		print('Skipping:')
 		pprint.pprint(exclude_regions)
 		print('/' * 80)
@@ -661,7 +662,7 @@ def magic(filename, xi_filename, options):
 	fp = open(temp_filename, 'wb')
 
 	# -------------------------------------------------------------- file header
-	fp.write(struct.pack('<21s22sb20sh',
+	fp.write(struct.pack('<21s22sB20sH',
 		'Extended Instrument: ',
 		pad_name(root, 22),
 		0x1A,
@@ -669,7 +670,7 @@ def magic(filename, xi_filename, options):
 		xi_version
 	))
 
-	# -------------------------------------------------------------- inst header
+	# --------------------------------------------------------------
 
 	# ADSR envelope:
 	# Attack time: time to go from the minimum to the maximum value (2 points: 0 time, minimum value -- attack time, maximum value)
@@ -685,7 +686,8 @@ def magic(filename, xi_filename, options):
 	# volume envelope
 	volume_ticks = 0
 	volume_level = 0
-	volume_envelope = []
+	volume_envelope_ticks = []
+	volume_envelope_level = []
 	vol_sustain_point = None
 
 	# Use the first region to generate the envelope
@@ -695,135 +697,181 @@ def magic(filename, xi_filename, options):
 		volume_level = int((float(region.sfz_params['ampeg_start']) * 0x40) / 100)
 
 	if 'ampeg_delay' in region.sfz_params:
-		volume_envelope.append(volume_ticks)
-		volume_envelope.append(volume_level)
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 		volume_ticks += int(float(region.sfz_params['ampeg_delay']) * stt)
 
 	if 'ampeg_attack' in region.sfz_params:
-		volume_envelope.append(volume_ticks)
-		volume_envelope.append(volume_level)
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 		volume_ticks += int(float(region.sfz_params['ampeg_attack']) * stt)
+	elif volume_envelope_ticks:
+		# If there already is a volume envelope, this is considered an attack time of 0
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 	# After the attack time, the volume level is at its maximum value
 	volume_level = 0x40
 
 	if 'ampeg_hold' in region.sfz_params:
-		volume_envelope.append(volume_ticks)
-		volume_envelope.append(volume_level)
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 		volume_ticks += int(float(region.sfz_params['ampeg_hold']) * stt)
+	elif volume_envelope_ticks:
+		# If there already is a volume envelope, this is considered a hold time of 0
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 	if 'ampeg_decay' in region.sfz_params:
-		volume_envelope.append(volume_ticks)
-		volume_envelope.append(volume_level)
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 		volume_ticks += int(float(region.sfz_params['ampeg_decay']) * stt)
+	elif volume_envelope_ticks:
+		# If there already is a volume envelope, this is considered a decay time of 0
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
 
 	# After the decay time, the volume level is at the sustain level
 	if 'ampeg_sustain' in region.sfz_params:
 		volume_level = int((float(region.sfz_params['ampeg_sustain']) * 0x40) / 100)
 
-	if volume_envelope:
-		volume_envelope.append(volume_ticks)
-		volume_envelope.append(volume_level)
-		vol_sustain_point = int(len(volume_envelope) / 2) - 1
-
-	# After the sustain, the volume level is at its minimum value
-	volume_level = 0
+	if volume_envelope_ticks:
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(volume_level)
+		vol_sustain_point = len(volume_envelope_ticks) - 1
 
 	if 'ampeg_release' in region.sfz_params:
 		volume_ticks += int(float(region.sfz_params['ampeg_release']) * stt)
-		if volume_envelope:
-			volume_envelope.append(volume_ticks)
-			volume_envelope.append(volume_level)
+		if volume_envelope_ticks:
+			# After the sustain, the volume level is at its minimum value
+			volume_envelope_ticks.append(volume_ticks)
+			volume_envelope_level.append(0)
 		else:
 			# If the envelope has not been created yet, set the first point for the sustain
-			volume_envelope.append(0)
-			volume_envelope.append(0x40)
-			vol_sustain_point = int(len(volume_envelope) / 2) - 1
+			volume_envelope_ticks.append(0)
+			volume_envelope_level.append(volume_level)
+			vol_sustain_point = len(volume_envelope_ticks) - 1
 
 			# and then set the release point
-			volume_envelope.append(volume_ticks)
-			volume_envelope.append(volume_level)
+			volume_envelope_ticks.append(volume_ticks)
+			volume_envelope_level.append(0)
+	elif volume_envelope_ticks:
+		# If there already is a volume envelope, this is considered a release time of 0
+		volume_envelope_ticks.append(volume_ticks)
+		volume_envelope_level.append(0)
 
-	if volume_ticks > 512:
-		for i in range(int(len(volume_envelope) / 2)):
-			volume_envelope[2 * i] = int((volume_envelope[2 * i] * 512) / volume_ticks)
+	# Remove duplicate values from the envelope
+	last_ticks = None
+	last_level = None
+	delete_envelope = []
+	delete_sustain = 0
+	for (i, ticks) in enumerate(volume_envelope_ticks):
+		level = volume_envelope_level[i]
+		if (ticks == last_ticks) and (level == last_level):
+			delete_envelope.insert(0, i)
+
+			# Since we are deleting a point before the sustain point, the sustain point must be decremented
+			if i <= vol_sustain_point:
+				delete_sustain += 1
+
+		last_ticks = ticks
+		last_level = level
+
+	for i in delete_envelope:
+		del volume_envelope_ticks[i]
+		del volume_envelope_level[i]
+
+	if vol_sustain_point is not None:
+		vol_sustain_point -= delete_sustain
+
+	# Adjust the envelope ticks to not exceed the maximum envelope length
+	if volume_ticks > options.max_envelope_length:
+		for (i, ticks) in enumerate(volume_envelope_ticks):
+			volume_envelope_ticks[i] = int((ticks * options.max_envelope_length) / volume_ticks)
 
 		print('/' * 80)
-		print('Too long envelope:', volume_ticks, 'ticks, shrinked to 512')
+		print('Too long envelope:', volume_ticks, 'ticks, shrinked to {}'.format(options.max_envelope_length))
 		print('/' * 80)
+
+	# TO DO -- Can the Pitch LFO parameters be used to compile the vibrato values?
+
+	# -------------------------------------------------------------- inst header
 
 	# Sample number for notes 1..96
-	fp.write(struct.pack('<{}b'.format(len(notes_samples)), *(notes_samples)))
+	fp.write(struct.pack('<{}B'.format(len(notes_samples)), *(notes_samples)))
 
 	# 12 volume envelope points
-	fp.write(struct.pack('<{}h'.format(len(volume_envelope)), *(volume_envelope)))
-	fp.write(struct.pack('<{}h'.format(24 - len(volume_envelope)), *([0] * (24 - len(volume_envelope)))))
+	if volume_envelope_ticks:
+		fp.write(struct.pack('<{}H'.format(len(volume_envelope_ticks) + len(volume_envelope_level)), *(itertools.chain.from_iterable(zip(volume_envelope_ticks, volume_envelope_level)))))
+
+	remaining_envelope_length = (12 - len(volume_envelope_ticks)) * 2
+	fp.write(struct.pack('<{}H'.format(remaining_envelope_length), *([0] * remaining_envelope_length)))
 
 	# 12 panning envelope points
-	fp.write(struct.pack('<24h', *([0] * 24)))
+	fp.write(struct.pack('<24H', *([0] * 24)))
 
 	# Number of volume points
-	fp.write(struct.pack('<b', int(len(volume_envelope) / 2)))
+	fp.write(struct.pack('<B', len(volume_envelope_ticks)))
 
 	# Number of panning points
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Volume sustain point
 	if vol_sustain_point is not None:
-		fp.write(struct.pack('<b', vol_sustain_point))
+		fp.write(struct.pack('<B', vol_sustain_point))
 	else:
-		fp.write(struct.pack('<b', 0))
+		fp.write(struct.pack('<B', 0))
 
 	# Volume loop start point
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Volume loop end point
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Panning sustain point
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Panning loop start point
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Panning loop end point
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Volume type;   b0=on, b1=sustain, b2=loop
-	if volume_envelope:
+	if volume_envelope_ticks:
 		volume_type = 0x03
 	else:
 		volume_type = 0
 
-	fp.write(struct.pack('<b', volume_type))
+	fp.write(struct.pack('<B', volume_type))
 
 	# Panning type;  b0=on, b1=sustain, b2=loop
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Vibrato type
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Vibrato sweep
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Vibrato depth
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Vibrato rate
-	fp.write(struct.pack('<b', 0))
+	fp.write(struct.pack('<B', 0))
 
 	# Volume fadeout (0..fff)
-	fp.write(struct.pack('<h', 0))
+	fp.write(struct.pack('<H', 0))
 
 	# ????? (Zeroes or extened info for PsyTexx (vol,finetune,pan,relative,flags))
-	fp.write(struct.pack('<22b', *([0] * 22)))
+	fp.write(struct.pack('<22B', *([0] * 22)))
 
 	# Number of Samples
-	fp.write(struct.pack('<h', len(regions)))
+	fp.write(struct.pack('<H', len(regions)))
 
 	# ---------------------------------------------------------- sample headers
 	for region in regions:
@@ -880,6 +928,7 @@ def main(argv):
 	parser.add_argument('-f', '--force', help='force reconversion', action='store_true')
 	parser.add_argument('-d', '--output-dir', help='set output directory')
 	parser.add_argument('-m', '--max-samples', help='set maximum number of samples (default: 16)', type=int, default=16)
+	parser.add_argument('-e', '--max-envelope-length', help='set maximum envelope length in ticks (default: 512)', type=int, default=512)
 	parser.add_argument('-s', '--enable-stereo', help='enable support for stereo samples', action='store_true')
 	parser.add_argument('-4', '--enable-32-bit', help='enable support for 32-bit samples', action='store_true')
 	parser.add_argument('-r', '--drumset', help='the specified sfz files are drumsets', action='store_true')
@@ -899,6 +948,10 @@ def main(argv):
 	# it doesn't make any sense to support more than 96 samples per instrument
 	if (options.max_samples < 1) or (options.max_samples > 96):
 		print('ERROR: Invalid maximum number of samples (valid from 1 to 96)')
+		return 2
+
+	if (options.max_envelope_length < 1) or (options.max_envelope_length > 65535):
+		print('ERROR: Invalid maximum envelope length (valid from 1 to 65535)')
 		return 2
 
 	start_time = timeit.default_timer()
