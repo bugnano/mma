@@ -670,124 +670,162 @@ def magic(filename, xi_filename, options):
 	))
 
 	# -------------------------------------------------------------- inst header
-	# Sample number for notes 1..96
-	fp.write(struct.pack('<{}b'.format(len(notes_samples)), *(notes_samples)))
 
-	stt = 50  # seconds-to-ticks converter
+	# ADSR envelope:
+	# Attack time: time to go from the minimum to the maximum value (2 points: 0 time, minimum value -- attack time, maximum value)
+	# Decay time: time to go from the maximum value to the sustain value (1 point: decay time, sustain value)
+	# Sustain level: Level at which the note is played while ON (no points, but it's the sustain point parameter)
+	# Release time: time to go from the sustain value to the minimum value (1 point: release time, release value)
+	# The sfz standard also has a Delay time before the Attack, and a Hold time between Attack and Decay.
+
+	# seconds-to-ticks converter
+	# Why 50?
+	stt = 50
 
 	# volume envelope
-	volume_points = 0
 	volume_ticks = 0
+	volume_level = 0
 	volume_envelope = []
-	if 'ampeg_attack' not in region.sfz_params:
-		volume_level = 0x40
-	else:
-		volume_level = 0
-	vol_sustain_point = 0
+	vol_sustain_point = None
 
-	#fp.write(struct.pack('<h', volume_ticks))
-	volume_envelope.append(volume_ticks)
-	if 'ampeg_delay' in region.sfz_params:
-		volume_ticks += float(region.sfz_params['ampeg_delay']) * stt
-		volume_points += 1
-		volume_level = 0
-
-		#fp.write(struct.pack('<h', volume_level))
-		volume_envelope.append(volume_level)
-		#fp.write(struct.pack('<h', volume_ticks))
-		volume_envelope.append(volume_ticks)
+	# Use the first region to generate the envelope
+	region = regions[0]
 
 	if 'ampeg_start' in region.sfz_params:
-		volume_level = int(float(region.sfz_params['ampeg_start']) / 100 * stt)
+		volume_level = int((float(region.sfz_params['ampeg_start']) * 0x40) / 100)
+
+	if 'ampeg_delay' in region.sfz_params:
+		volume_envelope.append(volume_ticks)
+		volume_envelope.append(volume_level)
+
+		volume_ticks += int(float(region.sfz_params['ampeg_delay']) * stt)
 
 	if 'ampeg_attack' in region.sfz_params:
+		volume_envelope.append(volume_ticks)
+		volume_envelope.append(volume_level)
+
 		volume_ticks += int(float(region.sfz_params['ampeg_attack']) * stt)
 
-	#fp.write(struct.pack('<h', volume_level))
-	volume_envelope.append(volume_level)
-	volume_points += 1
+	# After the attack time, the volume level is at its maximum value
+	volume_level = 0x40
 
 	if 'ampeg_hold' in region.sfz_params:
+		volume_envelope.append(volume_ticks)
+		volume_envelope.append(volume_level)
+
 		volume_ticks += int(float(region.sfz_params['ampeg_hold']) * stt)
-	else:
-		volume_level = 0x40
-	#fp.write(struct.pack('<h', volume_ticks))
-	volume_envelope.append(volume_ticks)
-	#fp.write(struct.pack('<h', volume_level))
-	volume_envelope.append(volume_level)
-	volume_points += 1
 
 	if 'ampeg_decay' in region.sfz_params:
-		volume_ticks += int(float(region.sfz_params['ampeg_decay']) * stt)
-		#fp.write(struct.pack('<h', volume_ticks))
 		volume_envelope.append(volume_ticks)
-
-		if 'ampeg_sustain' in region.sfz_params:
-			#fp.write(struct.pack('<h', int(float(region.sfz_params['ampeg_sustain']) / 100 * stt)))
-			volume_envelope.append(int(float(region.sfz_params['ampeg_sustain']) / 100 * stt))
-		else:
-			#fp.write(struct.pack('<h', 0))
-			volume_envelope.append(0)
-
-		volume_points += 1
-
-	if 'ampeg_sustain' in region.sfz_params:
-		volume_level = int(float(region.sfz_params['ampeg_sustain']) / 100 * stt)
-		#fp.write(struct.pack('<h', volume_ticks))
-		volume_envelope.append(volume_ticks)
-		#fp.write(struct.pack('<h', volume_level))
 		volume_envelope.append(volume_level)
-		volume_points += 1
-		vol_sustain_point = volume_points - 1
+
+		volume_ticks += int(float(region.sfz_params['ampeg_decay']) * stt)
+
+	# After the decay time, the volume level is at the sustain level
+	if 'ampeg_sustain' in region.sfz_params:
+		volume_level = int((float(region.sfz_params['ampeg_sustain']) * 0x40) / 100)
+
+	if volume_envelope:
+		volume_envelope.append(volume_ticks)
+		volume_envelope.append(volume_level)
+		vol_sustain_point = int(len(volume_envelope) / 2) - 1
+
+	# After the sustain, the volume level is at its minimum value
+	volume_level = 0
 
 	if 'ampeg_release' in region.sfz_params:
 		volume_ticks += int(float(region.sfz_params['ampeg_release']) * stt)
-		volume_level = 0x0
-		#fp.write(struct.pack('<h', volume_ticks))
-		volume_envelope.append(volume_ticks)
-		#fp.write(struct.pack('<h', volume_level))
-		volume_envelope.append(volume_level)
-		volume_points += 1
+		if volume_envelope:
+			volume_envelope.append(volume_ticks)
+			volume_envelope.append(volume_level)
+		else:
+			# If the envelope has not been created yet, set the first point for the sustain
+			volume_envelope.append(0)
+			volume_envelope.append(0x40)
+			vol_sustain_point = int(len(volume_envelope) / 2) - 1
+
+			# and then set the release point
+			volume_envelope.append(volume_ticks)
+			volume_envelope.append(volume_level)
 
 	if volume_ticks > 512:
 		for i in range(int(len(volume_envelope) / 2)):
-			volume_envelope[2 * i] = int(volume_envelope[2 * i] * 512 / volume_ticks)
+			volume_envelope[2 * i] = int((volume_envelope[2 * i] * 512) / volume_ticks)
+
 		print('/' * 80)
 		print('Too long envelope:', volume_ticks, 'ticks, shrinked to 512')
 		print('/' * 80)
 
-	fp.write(struct.pack('<{0}h'.format(2 * volume_points), *(volume_envelope)))
-	fp.write(struct.pack('<{0}h'.format(2 * (12 - volume_points)), *(0 for i in range(2 * (12 - volume_points)))))
-	#envelope = [0, 64, 4, 50, 8, 36, 13, 28, 20, 22, 33, 18, 47, 14, 62, 8, 85, 4, 161, 0, 100, 0, 110, 0]
-	#fp.write(struct.pack('<24h', *(envelope)))
-	fp.write(struct.pack('<24h', *(0 for i in range(24))))  # panning envelope
+	# Sample number for notes 1..96
+	fp.write(struct.pack('<{}b'.format(len(notes_samples)), *(notes_samples)))
 
-	fp.write(struct.pack('<b', volume_points))
+	# 12 volume envelope points
+	fp.write(struct.pack('<{}h'.format(len(volume_envelope)), *(volume_envelope)))
+	fp.write(struct.pack('<{}h'.format(24 - len(volume_envelope)), *([0] * (24 - len(volume_envelope)))))
+
+	# 12 panning envelope points
+	fp.write(struct.pack('<24h', *([0] * 24)))
+
+	# Number of volume points
+	fp.write(struct.pack('<b', int(len(volume_envelope) / 2)))
+
+	# Number of panning points
 	fp.write(struct.pack('<b', 0))
 
-	fp.write(struct.pack('<b', vol_sustain_point))
+	# Volume sustain point
+	if vol_sustain_point is not None:
+		fp.write(struct.pack('<b', vol_sustain_point))
+	else:
+		fp.write(struct.pack('<b', 0))
 
-	fp.write(struct.pack('<5b', *(0 for i in range(5))))
+	# Volume loop start point
+	fp.write(struct.pack('<b', 0))
 
-	volume_type = 0
-	if volume_points > 0:
-		volume_type += 0b1
-	if vol_sustain_point > 0:
-		volume_type += 0b10
+	# Volume loop end point
+	fp.write(struct.pack('<b', 0))
+
+	# Panning sustain point
+	fp.write(struct.pack('<b', 0))
+
+	# Panning loop start point
+	fp.write(struct.pack('<b', 0))
+
+	# Panning loop end point
+	fp.write(struct.pack('<b', 0))
+
+	# Volume type;   b0=on, b1=sustain, b2=loop
+	if volume_envelope:
+		volume_type = 0x03
+	else:
+		volume_type = 0
 
 	fp.write(struct.pack('<b', volume_type))
+
+	# Panning type;  b0=on, b1=sustain, b2=loop
 	fp.write(struct.pack('<b', 0))
 
-	# vibrato type/sweep/depth/rate
-	fp.write(struct.pack('<4b', *(0 for i in range(4))))
+	# Vibrato type
+	fp.write(struct.pack('<b', 0))
 
-	# envelope data
-	#fp.write(struct.pack('<b'))
+	# Vibrato sweep
+	fp.write(struct.pack('<b', 0))
 
-	fp.write(struct.pack('<h', 0))  # volume fadeout
-	fp.write(struct.pack('<22b', *(0 for i in range(22))))  # extended data
-	fp.write(struct.pack('<h', len(regions)))  # number of samples
+	# Vibrato depth
+	fp.write(struct.pack('<b', 0))
 
+	# Vibrato rate
+	fp.write(struct.pack('<b', 0))
+
+	# Volume fadeout (0..fff)
+	fp.write(struct.pack('<h', 0))
+
+	# ????? (Zeroes or extened info for PsyTexx (vol,finetune,pan,relative,flags))
+	fp.write(struct.pack('<22b', *([0] * 22)))
+
+	# Number of Samples
+	fp.write(struct.pack('<h', len(regions)))
+
+	# ---------------------------------------------------------- sample headers
 	for region in regions:
 		fp.write(struct.pack('<i', region.wav_params['sample_length'] * region.wav_params['sample_bittype'] * region.wav_params['channels']))  # sample length
 		fp.write(struct.pack('<2i', 0, 0))  # sample loop start and end
@@ -821,7 +859,7 @@ def magic(filename, xi_filename, options):
 		fp.write(struct.pack('<b', len(sample_name.rstrip('\0'))))
 		fp.write(struct.pack('<22s', sample_name))
 
-	# Sample data
+	# ------------------------------------------------------------- sample data
 	for region in regions:
 		write_delta_sample(region.wav_params['sample_path'], fp)
 

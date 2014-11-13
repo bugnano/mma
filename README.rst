@@ -29,6 +29,7 @@ Known Issues
 
 This version of MMA has the following known issues:
 
+- Volume envelope times may be wrong
 - Sample looping is not supported yet
 
 Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 8 bit or 16 bit mono wav format.
