@@ -39,7 +39,7 @@ import pprint
 import itertools
 
 
-__version__ = '0.0.1'
+__version__ = '0.1.0'
 
 VERSION = ''.join(['MMA v', __version__])
 
@@ -873,43 +873,59 @@ def magic(filename, xi_filename, options):
 	# Number of Samples
 	fp.write(struct.pack('<H', len(regions)))
 
-	# ---------------------------------------------------------- sample headers
+	# --------------------------------------------------------------
 	for region in regions:
-		fp.write(struct.pack('<i', region.wav_params['sample_length'] * region.wav_params['sample_bittype'] * region.wav_params['channels']))  # sample length
-		fp.write(struct.pack('<2i', 0, 0))  # sample loop start and end
-		# volume
-		if 'volume' in region.sfz_params:
-			fp.write(struct.pack('<B', math.floor(255 * math.exp(float(region.sfz_params['volume']) / 10) / math.exp(0.6))))	# 'cause volume is in dB
-		else:
-			fp.write(struct.pack('<B', 255))
-
 		# Get the relative note and finetune based on the sampling rate of the sample
 		finetune, relnote = convertc4spd(region.wav_params['sampling_rate'])
 		relnote += XI_REL_NOTE_ZERO
 
-		fp.write(struct.pack('<b', finetune + int(region.sfz_params['tune'])))  # finetune (signed!)
-
-		fp.write(struct.pack('<b', region.wav_params['sample_type']))  # sample type
-
-		#panning (unsigned!)
-		if 'pan' in region.sfz_params:
-			fp.write(struct.pack('<B', (float(region.sfz_params['pan']) + 100) * 255 / 200))
-		else:
-			fp.write(struct.pack('<B', 128))
-
-		# relative note - transpose c4 ~ 00
-		fp.write(struct.pack('<b', relnote - region.sfz_params['pitch_keycenter']))
-
-		# Sample Name, padded w/ zeroes
+		# Get the sample name, padded w/ zeroes
 		root, ext = os.path.splitext(os.path.basename(path_local(region.sfz_params['sample'])))
 		sample_name = pad_name(root, 22, '\0')
 
-		fp.write(struct.pack('<b', len(sample_name.rstrip('\0'))))
+		# ---------------------------------------------------------- sample headers
+
+		# Sample Length
+		fp.write(struct.pack('<I', region.wav_params['sample_length'] * region.wav_params['sample_bittype'] * region.wav_params['channels']))
+
+		# Sample loop start
+		fp.write(struct.pack('<I', 0))
+
+		# Sample loop length
+		fp.write(struct.pack('<I', 0))
+
+		# Volume
+		if 'volume' in region.sfz_params:
+			fp.write(struct.pack('<B', int(255 * math.exp(float(region.sfz_params['volume']) / 10) / math.exp(0.6))))	# 'cause volume is in dB
+		else:
+			fp.write(struct.pack('<B', 255))
+
+		# Finetune (signed)
+		fp.write(struct.pack('<b', finetune + int(region.sfz_params['tune'])))
+
+		# Sample Type
+		fp.write(struct.pack('<B', region.wav_params['sample_type']))
+
+		# Panning (unsigned)
+		if 'pan' in region.sfz_params:
+			fp.write(struct.pack('<B', int(((float(region.sfz_params['pan']) + 100) * 255) / 200)))
+		else:
+			fp.write(struct.pack('<B', 128))
+
+		# Relative Note - transpose c4 ~ 00
+		fp.write(struct.pack('<b', relnote - region.sfz_params['pitch_keycenter']))
+
+		# Sample Name Length
+		fp.write(struct.pack('<B', len(sample_name.rstrip('\0'))))
+
+		# Sample Name, padded w/ zeroes
 		fp.write(struct.pack('<22s', sample_name))
 
 	# ------------------------------------------------------------- sample data
 	for region in regions:
 		write_delta_sample(region.wav_params['sample_path'], fp)
+
+	# --------------------------------------------------------------
 
 	print(len(regions), 'samples')
 	print(int(fp.tell() / 1024), 'kB written in file "', os.path.basename(xi_filename), '" during', timeit.default_timer() - start, 'seconds')

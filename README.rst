@@ -13,16 +13,29 @@ Based on Samplicity_ version 0.4 by Andrii Magalich.
 
 Thanks to `Alex Zolotov`_ for help and materials.
 
+Why MMA?
+========
+
+I forked Samplicity_ instead of contributing simply because we have different
+goals: while Samplicity_ is designed in order to be compatible with `SunVox tracker`_,
+with its advanced features like stereo or 32-bit samples, my goal is to be compatible
+with MilkyTracker_, which has many more limitations, like no more than 16 samples per instrument.
+
+I chose to fork version 0.4 instead of version 0.5 because version 0.5 depends on the
+scikits.audiolab library, which is ridiculously hard to install; so another goal of MMA
+that is different from Samplicity_ is to depend only on the Python_ standard library.
+
 Disclaimer
 ==========
 
-MMA is in early beta status and does not support all features in
-intersection of .SFZ and .XI.
-Now it is tested **only** in MilkyTracker_ with the |SSO|_ sample
-pack.
+MMA does not yet support all the features in intersection of .SFZ and .XI.
+
+Now it is tested **only** in MilkyTracker_ with the |SSO|_ sample pack.
 
     Your tracker may crash for wrongly encoded .XI-instruments, so
     **you should save your files every time before loading an instrument**
+
+Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 8 bit or 16 bit mono wav format.
 
 Known Issues
 ------------
@@ -30,9 +43,16 @@ Known Issues
 This version of MMA has the following known issues:
 
 - Volume envelope times may be wrong
+- Auto vibrato is not supported yet
 - Sample looping is not supported yet
 
-Before running MMA it is recommended to use a tool like SOX_ to convert all the samples to 8 bit or 16 bit mono wav format.
+Status and Roadmap
+------------------
+
+MMA version 0.1.0 supports all the .XI compatible opcodes of the |SSO|_ sample pack,
+but in order to support auto vibrato and sample looping, it has to be tested with other
+sample packs, so in the following days I will test the |Aria|_ sample pack in order to
+implement the missing functionality.
 
 Formats
 =======
@@ -151,14 +171,18 @@ Notices and errors
 - **Notice: some regions are overlapping and would be overwritten** — .SFZ format supports velocity maps. But .XI doesn't. Consider splitting your .SFZ file into separate files. For example, I've got ``Grand Piano (Piano).sfz`` and ``Grand Piano (Forte).sfz``
 - **24bit samples are not supported** — .XI and Sunvox don't support 24bit sample format and there is no cooldown feature for them in MMA
 - **Too long envelope, shrinked to 512** — .XI does not support envelopes longer than 512 ticks (~10.24 seconds), so you instrument envelope was modified to fit this range
-- **Too many samples in file** — .XI does not support more than 128 samples in instrument. Consider splitting your file or removing some.
+- **Too many samples in file** — .XI does not support more than 16 samples in instrument. Consider splitting your file or removing some.
 
 .. _MilkyTracker: http://milkytracker.org/
 .. _Samplicity: https://github.com/ckald/Samplicity/
 .. _Alex Zolotov: http://www.warmplace.ru/
 .. _Python: https://www.python.org/
 .. _SOX: http://sox.sourceforge.net/
+.. _`SunVox tracker`: http://www.warmplace.ru/soft/sunvox/
 
 .. |SSO| replace:: Sonatina Symphonic Orchestra
 .. _SSO: http://sso.mattiaswestlund.net/
+
+.. |Aria| replace:: Free Sounds for ARIA Engine
+.. _Aria: http://www.plogue.com/phpBB3/viewtopic.php?t=7090
 
