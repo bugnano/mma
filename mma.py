@@ -37,6 +37,7 @@ import math
 import argparse
 import pprint
 import itertools
+import posixpath
 
 
 __version__ = '0.1.0'
@@ -363,11 +364,8 @@ def _path_insensitive(path):
 	else:
 		return
 
-def path_local(path):
-	if os.sep == '\\':
-		return path
-	else:
-		return path.replace('\\', os.sep)
+def path_posix(path):
+	return path.replace('\\', '/')
 
 
 # Function taken from http://stackoverflow.com/questions/9873626/choose-m-evenly-spaced-elements-from-a-sequence-of-length-n
@@ -380,10 +378,15 @@ class SFZ_region(object):
 		self.sfz_params = {}
 		self.wav_params = {}
 
-	def validate(self):
+	def validate(self, options):
 		# A region without a sample is useless
 		if 'sample' not in self.sfz_params:
 			return False
+
+		# Apply the macro substitutions to all the parameters
+		for name, value in options.macros:
+			for k, v in self.sfz_params.iteritems():
+				self.sfz_params[k] = v.replace(name, value)
 
 		if 'tune' not in self.sfz_params:
 			self.sfz_params['tune'] = 0
@@ -426,21 +429,31 @@ class SFZ_region(object):
 
 		return True
 
-	def load_audio(self, cwd, options):
+	def load_audio(self, sample_dir, options):
 		# Strip the leading path separators for badly formed sfz files (the sfz standard mandates relative paths)
-		sample_path = path_local(self.sfz_params['sample']).lstrip(os.sep)
-		self.wav_params['sample_path'] = path_insensitive(os.path.normpath(os.path.join(cwd, sample_path)))
+		default_path = path_posix(self.sfz_params.get('default_path', '')).lstrip('/')
+		sample_path = path_posix(self.sfz_params['sample']).lstrip('/')
+
+		# Force the .wav file name extension to samples
+		root, ext = os.path.splitext(sample_path)
+		sample_path = ''.join([root, '.wav'])
+
+		self.wav_params['sample_path'] = path_insensitive(os.path.normpath(posixpath.join(sample_dir, default_path, sample_path)))
 		self.wav_params.update(identify_sample(self.wav_params['sample_path'], options))
 
 
 def parse_sfz(filename, options):
 	regions = []
 
+	control_params = {}
+	global_params = {}
+	master_params = {}
 	group_params = {}
+	params_obj = None
 	last_chunk = None
 	curr_region = None
+	in_control = False
 	in_region = False
-	in_group = False
 
 	lineno = 0
 	fp = open(filename, 'rU')
@@ -469,49 +482,80 @@ def parse_sfz(filename, options):
 			if chunk.startswith('/'):
 				break
 
-			if chunk == '<group>':
+			if chunk == '<control>':
+				# it's a control group - lets remember the following
+				last_chunk = None
+				in_region = False
+				control_params.clear()
+				params_obj = control_params
+			elif chunk == '<global>':
+				# it's a global group - lets remember the following
+				last_chunk = None
+				in_region = False
+				master_params.clear()
+				params_obj = global_params
+			elif chunk == '<master>':
+				# it's a master group - lets remember the following
+				last_chunk = None
+				in_region = False
+				master_params.clear()
+				params_obj = master_params
+			elif chunk == '<group>':
 				# it's a group - lets remember the following
 				last_chunk = None
-				in_group = True
 				in_region = False
-				group_params = {}
+				group_params.clear()
+				params_obj = group_params
 			elif chunk == '<region>':
 				# it's a region - save the following and add group data
 				curr_region = SFZ_region()
 				regions.append(curr_region)
-				if in_group:
-					curr_region.sfz_params.update(group_params)
+				curr_region.sfz_params.update(control_params)
+				curr_region.sfz_params.update(global_params)
+				curr_region.sfz_params.update(master_params)
+				curr_region.sfz_params.update(group_params)
 
 				last_chunk = None
 				in_region = True
+				params_obj = None
 			else:
 				# this should be the assignment
 				segments = chunk.split('=', 1)
 				if len(segments) != 2:
 					# maybe, we can just append this data to the previous chunk
 					if last_chunk is not None:
-						curr_region.sfz_params[last_chunk[0]] = ' '.join([curr_region.sfz_params[last_chunk[0]], segments[0]])
-						segments = (last_chunk[0], curr_region.sfz_params[last_chunk[0]])
+						if in_region:
+							curr_region.sfz_params[last_chunk[0]] = ' '.join([curr_region.sfz_params[last_chunk[0]], segments[0]])
+							segments = (last_chunk[0], curr_region.sfz_params[last_chunk[0]])
+						elif params_obj is not None:
+							params_obj[last_chunk[0]] = ' '.join([params_obj[last_chunk[0]], segments[0]])
+							segments = (last_chunk[0], params_obj[last_chunk[0]])
+						else:
+							print('Ambiguous spaces in SFZ file:', filename, 'at line:', lineno)
+							sys.exit(1)
 					else:
 						print('Ambiguous spaces in SFZ file:', filename, 'at line:', lineno)
 						sys.exit(1)
 
 				if in_region:
 					curr_region.sfz_params[segments[0]] = segments[1]
-				elif in_group:
-					group_params[segments[0]] = segments[1]
+				elif params_obj is not None:
+					params_obj[segments[0]] = segments[1]
 
 				last_chunk = segments
 
 	fp.close()
 
-	cwd = os.path.dirname(filename)
+	if options.sample_dir:
+		sample_dir = options.sample_dir
+	else:
+		sample_dir = os.path.dirname(filename)
 
 	# complete samples info
 	delete_regions = []
 	for (i, region) in enumerate(regions):
-		if region.validate():
-			region.load_audio(cwd, options)
+		if region.validate(options):
+			region.load_audio(sample_dir, options)
 		else:
 			# Invalid region, mark it for deletion (last index first)
 			delete_regions.insert(0, i)
@@ -880,7 +924,7 @@ def magic(filename, xi_filename, options):
 		relnote += XI_REL_NOTE_ZERO
 
 		# Get the sample name, padded w/ zeroes
-		root, ext = os.path.splitext(os.path.basename(path_local(region.sfz_params['sample'])))
+		root, ext = posixpath.splitext(posixpath.basename(path_posix(region.sfz_params['sample'])))
 		sample_name = pad_name(root, 22, '\0')
 
 		# ---------------------------------------------------------- sample headers
@@ -948,6 +992,10 @@ def main(argv):
 	parser.add_argument('-s', '--enable-stereo', help='enable support for stereo samples', action='store_true')
 	parser.add_argument('-4', '--enable-32-bit', help='enable support for 32-bit samples', action='store_true')
 	parser.add_argument('-r', '--drumset', help='the specified sfz files are drumsets', action='store_true')
+
+	parser.add_argument('--sample-dir', help='set sample directory', default='')
+	parser.add_argument('--define', help='define a macro', action='append', metavar='$NAME=VALUE', default=[])
+
 	parser.add_argument('sfz_file', help='sfz file(s) to convert', nargs='+')
 	options = parser.parse_args(argv[1:])
 
@@ -960,6 +1008,12 @@ def main(argv):
 		print('ERROR: Invalid output directory')
 		return 2
 
+	if options.sample_dir:
+		options.sample_dir = os.path.normpath(options.sample_dir)
+		if not os.path.isdir(options.sample_dir):
+			print('ERROR: Invalid sample directory')
+			return 2
+
 	# As there are only 96 notes in the instrument header and at most 1 sample per note,
 	# it doesn't make any sense to support more than 96 samples per instrument
 	if (options.max_samples < 1) or (options.max_samples > 96):
@@ -969,6 +1023,17 @@ def main(argv):
 	if (options.max_envelope_length < 1) or (options.max_envelope_length > 65535):
 		print('ERROR: Invalid maximum envelope length (valid from 1 to 65535)')
 		return 2
+
+	options.macros = []
+	for macro in options.define:
+		segments = macro.split('=', 1)
+		if len(segments) != 2:
+			print('ERROR: Invalid macro: {}'.format(macro))
+			return 2
+
+		# TO DO -- Should I check if the macro begins with the '$' character?
+
+		options.macros.append(segments)
 
 	start_time = timeit.default_timer()
 	converted = 0
